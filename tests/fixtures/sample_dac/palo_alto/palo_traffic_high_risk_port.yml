@@ -1,0 +1,16 @@
+AnalysisType: rule
+RuleID: palo_traffic_high_risk_port
+Filename: palo_traffic_high_risk_port.py
+Enabled: true
+LogTypes:
+  - Palo.Traffic
+Severity: Medium
+Threshold: 1
+DedupPeriodMinutes: 60
+CreateAlert: true
+Description: Outbound allow to a known high-risk destination port.
+Runbook: >
+  Query Palo.Traffic for src_ip over the last 24h. Confirm whether the host
+  normally talks to this port. If the destination is external and the port is
+  in the high-risk set, treat as suspicious and check the process/user context.
+Tags: [Palo Alto, Network]

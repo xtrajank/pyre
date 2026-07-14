@@ -1,0 +1,21 @@
+# Declarative alert destinations. Add an INSTANCE here; add a new KIND only by
+# adding an adapter in engine/pyre_engine/dispatch.py. Secrets come from
+# Key Vault via *_env references, never inline.
+
+destinations:
+  - name: mock                 # test-lab sink
+    kind: mock
+    enabled: true
+    url_env: MOCK_DEST_URL
+
+  - name: torq_dev
+    kind: torq
+    enabled: true
+    url_env: TORQ_DEV_URL
+    token_env: TORQ_DEV_TOKEN   # Key Vault reference
+
+  - name: torq_prod
+    kind: torq
+    enabled: false              # enabled in prod env config
+    url_env: TORQ_PROD_URL
+    token_env: TORQ_PROD_TOKEN

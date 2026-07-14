@@ -1,0 +1,16 @@
+# One-time: create the remote state backend (private, locked).
+# az group create -n rg-tfstate -l eastus2
+# az storage account create -n pyretfstate -g rg-tfstate -l eastus2 \
+#   --sku Standard_LRS --min-tls-version TLS1_2 --allow-blob-public-access false
+# az storage container create -n tfstate --account-name pyretfstate --auth-mode login
+#
+# Then copy this block into each env's backend.tf and `terraform init`.
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "rg-tfstate"
+    storage_account_name = "pyretfstate"
+    container_name       = "tfstate"
+    key                  = "REPLACE-per-env.terraform.tfstate"
+    use_azuread_auth     = true
+  }
+}

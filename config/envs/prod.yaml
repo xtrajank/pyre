@@ -1,0 +1,3 @@
+env: prod
+cost_profile: scale
+default_routes: [torq_prod]

@@ -1,0 +1,18 @@
+# secrets & state - never commit
+*.tfvars
+!*.tfvars.example
+.terraform/
+*.tfstate
+*.tfstate.*
+.env
+local.settings.json
+# python
+__pycache__/
+*.pyc
+.venv/
+*.__pycache__/
+# build artifacts / pulled DaC bundle (detections live in an external repo)
+engine/registry_index.json
+bundle/
+.bundle/
+.bundle.src/

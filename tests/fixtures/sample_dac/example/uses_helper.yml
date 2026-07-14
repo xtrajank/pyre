@@ -1,0 +1,11 @@
+AnalysisType: rule
+RuleID: uses_helper
+Filename: uses_helper.py
+Enabled: true
+LogTypes:
+  - Test.HelperLog
+Severity: Medium
+Threshold: 1
+DedupPeriodMinutes: 60
+CreateAlert: true
+Description: Fixture detection that imports a global helper.

@@ -1,0 +1,26 @@
+# dev INSTANCE of pyre. Copy to dev.tfvars and fill in. Same composition as prod,
+# just cheaper values. Deploy with:
+#   terraform -chdir=infra init  -backend-config="key=dev.tfstate"
+#   terraform -chdir=infra apply -var-file=envs/dev.tfvars
+# (or: make apply ENV=dev)
+
+name_prefix         = "pyredev" # must be globally unique across ALL instances
+env                 = "dev"
+location            = "eastus2"
+resource_group_name = "rg-pyre-dev"
+cost_profile        = "test" # cheapest SKUs
+owner               = "secops"
+
+# Keep each instance's network distinct so they can peer if ever needed:
+address_space           = "10.0.0.0/16"
+pe_subnet_prefix        = "10.0.1.0/24"
+functions_subnet_prefix = "10.0.2.0/24"
+
+# Batch <-> single-event: 256 = batched (default). Set 1 for single-event
+# (one invocation per log) on a low-volume, latency-critical instance.
+# max_event_batch_size = 256
+
+# Identities to grant (optional until you wire Cribl / CI):
+# cribl_sender_principal_id = "<object-id-of-cribl-identity>"
+# publisher_principal_id    = "<object-id-of-ci-oidc-sp>"
+# signals_sink_url          = "https://<cribl-http-source>"

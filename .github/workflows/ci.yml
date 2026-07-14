@@ -1,0 +1,29 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  detections:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install pyyaml pytest
+      - run: ./cli/pyre validate
+      - run: ./cli/pyre build
+      - run: ./cli/pyre test
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: fmt + validate
+        run: |
+          terraform -chdir=infra fmt -check -recursive
+          terraform -chdir=infra init -backend=false
+          terraform -chdir=infra validate
+          echo "terraform plan runs in the deploy workflow with cloud creds (OIDC)"

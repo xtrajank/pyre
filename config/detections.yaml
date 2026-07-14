@@ -1,0 +1,57 @@
+# The detections live in an EXTERNAL Detections-as-Code (DaC) repository - the
+# same layout as panther-analysis: a paired .py (logic) + .yml (metadata) per
+# detection. This system holds ONLY this pointer to that repo. No detection code
+# lives in this repo.
+#
+# Freshness model (see docs/architecture.md "Detection freshness"):
+#   push to DaC repo  ->  a bundle is published to `bundle` below  ->  every warm
+#   worker hot-reloads it within `refresh_interval_seconds`. No redeploy.
+#
+# The seam is `engine/pyre_engine/dac.py`: swap `bundle.mode` (local <-> blob) or
+# replace the whole source with an Event-Grid-push variant without touching the
+# engine. Modularity is the point.
+
+dac:
+  # Where the detections live. Point this at your DaC repo (panther-analysis or a
+  # private fork). `path` is the subfolder inside that repo holding the detections.
+  repo: https://github.com/panther-labs/panther-analysis
+  ref: main                 # branch/tag/commit. Pin a tag or sha for reproducible prod.
+  path: rules               # subfolder in the repo that contains the detections
+
+  # Shared "global helper" dirs (Panther's `AnalysisType: global` .py+.yml files
+  # that detections import by name, e.g. `from panther_base_helpers import ...`).
+  # These usually live in a SIBLING dir outside `path`, so list them here and
+  # `pyre pull` copies them into the bundle and the engine puts them on the import
+  # path. Add any dir your detections import from (data_models, etc.).
+  global_helpers: [global_helpers]
+
+  # Auth for CLONING the repo. Used by the CLI/CI at PUBLISH time only - the engine
+  # never clones (it pulls the already-built bundle via Managed Identity). The PAT
+  # is read from this env var, fed from Key Vault (prod) or a CI secret. Leave the
+  # var unset for a public repo.
+  token_env: DAC_TOKEN
+
+  include: ["**/*.yml", "**/*.yaml", "**/*.py"]
+  exclude: ["**/*_tests.py", "**/*_test.py"]
+
+# How a running worker gets the bundle, and how fast a push reflects.
+bundle:
+  mode: local               # local | blob  (change here, not in engine code)
+
+  # local: the worker reads this directory as-is. In prod this is an Azure Files
+  # mount that the CI publish step writes to; in dev it's where `pyre pull` lands.
+  local_dir: ./.bundle
+
+  # blob: the CI publish step (`pyre publish`) writes a versioned bundle + a tiny
+  # pointer here; the worker polls the pointer and pulls new bundles via Managed
+  # Identity (no PAT). account_url is injected per-env by the pipeline
+  # (BUNDLE_BLOB_ACCOUNT_URL / Terraform), so it stays out of git.
+  blob:
+    account_url: ""                 # e.g. https://pyrestor.blob.core.windows.net
+    container: detections           # separate from the Flex deploy-package "bundle" container
+    pointer_blob: current.json      # {"version": "<sha>", "path": "bundles/<sha>.zip"}
+
+  # Upper bound on "time from push to live" on an already-warm worker. One cheap
+  # pointer read per worker per interval - NOT per event. Lower = fresher + a few
+  # more reads; 30-60s is the sweet spot at millions of logs/hour.
+  refresh_interval_seconds: 45

@@ -1,0 +1,30 @@
+# prod INSTANCE of pyre. Copy to prod.tfvars and fill in. Identical composition to
+# dev — only the values differ (bigger SKUs, its own network + state). Deploy with:
+#   terraform -chdir=infra init  -backend-config="key=prod.tfstate"
+#   terraform -chdir=infra apply -var-file=envs/prod.tfvars
+# (or: make apply ENV=prod)
+
+name_prefix         = "pyreprod" # globally unique; distinct from dev
+env                 = "prod"
+location            = "eastus2"
+resource_group_name = "rg-pyre-prod"
+cost_profile        = "scale" # Premium Redis, auto-inflating Event Hubs, Flex to 1000 instances
+owner               = "secops"
+
+# Distinct network from dev so the two can peer:
+address_space           = "10.1.0.0/16"
+pe_subnet_prefix        = "10.1.1.0/24"
+functions_subnet_prefix = "10.1.2.0/24"
+
+# Event Hubs scaling floor/ceiling for prod volume:
+throughput_units_floor = 2
+max_throughput_units   = 20
+
+# Batch <-> single-event ceiling. 256 = batched (recommended for prod volume;
+# it's a ceiling, not a wait, so it doesn't delay alerts). 1 = single-event.
+# max_event_batch_size = 256
+
+# Prod really wants these set:
+# cribl_sender_principal_id = "<object-id-of-cribl-identity>"
+# publisher_principal_id    = "<object-id-of-ci-oidc-sp>"
+# signals_sink_url          = "https://<cribl-http-source>"

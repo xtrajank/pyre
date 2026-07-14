@@ -1,0 +1,16 @@
+AnalysisType: rule
+RuleID: cloudflare_http_sqli
+Filename: cloudflare_http_sqli.py
+Enabled: true
+LogTypes:
+  - Cloudflare.HttpRequest
+Severity: High
+Threshold: 5
+DedupPeriodMinutes: 30
+CreateAlert: true
+Description: Repeated requests whose URI shows SQL-injection patterns.
+Runbook: >
+  Pivot on ClientIP in Cloudflare.HttpRequest for the last 1h. Count distinct
+  URIs and confirm whether the pattern is a scanner. If 5+ SQLi-shaped requests
+  in 30m from one IP, treat as active probing.
+Tags: [Cloudflare, WebApp]

@@ -1,0 +1,78 @@
+name: publish-detections
+# Pull the external DaC repo, validate/build, and publish the bundle to Blob.
+# Warm workers hot-reload it within refresh_interval_seconds (default 45s) - no
+# redeploy. This is the "push -> live" pipeline in docs/architecture.md.
+#
+# Triggers:
+#   - workflow_dispatch     : publish on demand (pick the env).
+#   - repository_dispatch   : the DaC repo fires this on merge (see the snippet at
+#                             the bottom of this file), so YOUR push to the DaC
+#                             repo drives a publish here automatically.
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: target environment
+        type: choice
+        options: [dev, prod]
+        default: dev
+  repository_dispatch:
+    types: [dac-updated]
+
+permissions:
+  id-token: write      # OIDC federation to Azure (no stored secret)
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.env || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install pyyaml azure-identity azure-storage-blob
+
+      # Pull the DaC repo at the pinned ref. DAC_TOKEN scopes to a private repo;
+      # omit for a public one. DAC_REF lets a repository_dispatch pin the exact sha.
+      - name: pull DaC bundle
+        env:
+          DAC_TOKEN: ${{ secrets.DAC_TOKEN }}
+          DAC_REF: ${{ github.event.client_payload.ref || vars.DAC_REF || '' }}
+        run: |
+          ./cli/pyre pull
+          ./cli/pyre validate
+          ./cli/pyre build
+
+      # OIDC login - the SP behind these must hold the detections-container role
+      # (Terraform: publisher_principal_id).
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: publish bundle -> Blob
+        env:
+          BUNDLE_BLOB_ACCOUNT_URL: ${{ vars.BUNDLE_BLOB_ACCOUNT_URL }}  # e.g. https://pyrestor.blob.core.windows.net
+        run: ./cli/pyre publish
+
+# ---------------------------------------------------------------------------
+# Put this in the DaC repo (.github/workflows/notify-pyre.yml) so a merge there
+# publishes here automatically. PYRE_DISPATCH_TOKEN is a PAT with `repo` scope on
+# THIS repo:
+#
+#   name: notify-pyre
+#   on: { push: { branches: [main] } }
+#   jobs:
+#     notify:
+#       runs-on: ubuntu-latest
+#       steps:
+#         - run: |
+#             curl -sf -X POST \
+#               -H "Authorization: token ${{ secrets.PYRE_DISPATCH_TOKEN }}" \
+#               -H "Accept: application/vnd.github+json" \
+#               https://api.github.com/repos/<you>/pyre/dispatches \
+#               -d '{"event_type":"dac-updated","client_payload":{"ref":"${{ github.sha }}"}}'
+# ---------------------------------------------------------------------------
