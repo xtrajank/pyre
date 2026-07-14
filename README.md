@@ -1,12 +1,8 @@
 # pyre
 
-**pyre is a security alarm system.** Logs (records of things happening — a login, a firewall connection, a web request) stream in from across the company. pyre runs a library of **detections** — small rules that say "this pattern is suspicious" — against every log, and when one matches it opens a **case** for a human to look at. It is a from-scratch, cheaper replacement for a commercial product called **Panther**, built on Microsoft Azure and driven by detections kept in a normal Git repository.
-
-If none of that meant anything to you, that's fine — **start with the [GLOSSARY](docs/GLOSSARY.md)**, which explains every term in plain English. This whole repo is written to be approachable.
+**pyre is the compute controller for a SIEM.** Logs stream in and pyre runs a library of **python-based detections** against those logs. When one matches it pushes and alert and a signal.
 
 ---
-
-## New here? Read in this order
 
 1. **[docs/GLOSSARY.md](docs/GLOSSARY.md)** — every term used anywhere in this repo, in plain English. 10 minutes. Come back here after.
 2. **[docs/architecture.md](docs/architecture.md)** — the one-page "how it fits together and why," with the pipeline diagram.
@@ -17,9 +13,7 @@ Then dip into a directory's own `README.md` (table below) when you need depth on
 
 ---
 
-## The one-paragraph mental model
-
-A commercial tool (Panther) currently does five jobs: (1) clean up raw logs, (2) run detections against them, (3) remember what it has seen so it doesn't alert twice on the same thing, (4) open cases, and (5) let a human search and investigate. pyre rebuilds jobs 2–4 on Azure and hands job 1 to a tool called **Cribl** and job 5 to your case tool (**Torq**). The detections themselves are **not in this repo** — they live in a separate Git repository (like Panther's `panther-analysis`), and pyre pulls them in. That separation is the whole point: security engineers edit detections in one place; pyre is the engine that runs them.
+## The mental model
 
 ```
    Logs from Okta, AWS,        pyre (this repo)                 A human
@@ -75,4 +69,4 @@ Each directory has its own `README.md` that goes deep on that topic. Start at th
 - **Cheap at scale:** batch everything; one Azure Function execution evaluates hundreds of logs; scale to zero when idle.
 - **No secrets in code:** every service is reached by identity (Managed Identity) or Key Vault reference, never a password in a file.
 - **Modular:** add a log source or an alert destination by editing config, not code; replace any Terraform module without touching the others.
-- **Detections stay portable:** they're plain code in their own repo with the same function contract Panther uses, so you can run Panther and pyre side by side during migration.
+- **Detections stay portable:** they're plain code in their own repo.
