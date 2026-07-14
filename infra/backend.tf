@@ -8,7 +8,7 @@
 terraform {
   backend "azurerm" {
     resource_group_name  = "rg-tfstate"
-    storage_account_name = "pyretfstate" # <- your state storage account (globally unique; change if taken)
+    storage_account_name = "pyretfstate" # <- state storage account
     container_name       = "tfstate"
     use_azuread_auth     = true # auth to the state store with your Entra login, no keys
     # key is supplied per instance at `terraform init -backend-config="key=..."`

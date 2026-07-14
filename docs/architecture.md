@@ -53,7 +53,8 @@ At that volume the detection code (hundreds of `.py` modules) is loaded into an 
 
 ```
 push to DaC repo
-   -> DaC repo fires repository_dispatch -> .github/workflows/publish-detections.yml
+   -> DaC push triggers .azure-pipelines/publish-detections.yml (native ADO
+      repository trigger - DaC is an Azure Repos Git repo)
    -> `pyre pull` (clone at ref, filter to dac.path) -> `pyre build` -> `pyre publish`:
       upload bundles/<sha>.zip, THEN flip current.json pointer          [seconds]
    -> each warm worker, at most once per refresh_interval_seconds (default 45s),
@@ -63,7 +64,7 @@ push to DaC repo
 
 Cost of freshness: **one cheap pointer read per worker per interval — not per event.** "Time from push to live" ≈ CI publish (seconds) + refresh interval ≈ **under a minute, no redeploy**. Enable/disable rides the same tick (an App Config flag), so it's just as fast.
 
-Two identities, least privilege: the **CI publisher** (GitHub OIDC SP, `publisher_principal_id`) *writes* the `detections` container; the **processor** (Managed Identity) *reads* it. No PAT ever reaches the function — the PAT only clones the DaC repo, inside CI. Publish uploads the zip before moving the pointer, so a worker never sees a pointer to a bundle that isn't there.
+Two identities, least privilege: the **CI publisher** (an Azure Pipelines Workload Identity Federation service connection, `publisher_principal_id`) *writes* the `detections` container; the **processor** (Managed Identity) *reads* it. No PAT ever reaches the function — cloning the DaC repo inside CI needs no PAT either, since it's a same-org Azure Repos Git repo (the pipeline's own OAuth token reads it). Publish uploads the zip before moving the pointer, so a worker never sees a pointer to a bundle that isn't there.
 
 The whole mechanism lives behind one interface, [engine/pyre_engine/dac.py](../engine/pyre_engine/dac.py) `BundleSource` + [registry.py](../engine/pyre_engine/registry.py) `BundleLoader`. Swapping the poll for an **Event Grid "blob written" push** (sub-second) or the bundle store (`bundle.mode` local ↔ blob) is a one-line change in `source_from_config` — the engine doesn't move. A transient pointer/blob error keeps serving the last-good Registry, so a storage blip never stops detection.
 

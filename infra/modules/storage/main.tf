@@ -23,7 +23,7 @@ resource "azurerm_storage_container" "bundle" {
 # Detection bundles published from the DaC repo (`pyre publish`): versioned zips
 # + a current.json pointer. Separate from the Flex deploy-package "bundle" above.
 # The processor reads it via the account-scoped Blob Data role below; the CI
-# publisher writes it via its own OIDC service principal.
+# publisher writes it via its own Workload Identity Federation service connection.
 resource "azurerm_storage_container" "detections" {
   name                  = "detections"
   storage_account_id    = azurerm_storage_account.sa.id
@@ -51,7 +51,7 @@ resource "azurerm_role_assignment" "blob_data" {
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = var.processor_principal_id
 }
-# CI publisher (GitHub Actions OIDC SP) writes detection bundles + the pointer.
+# CI publisher (Azure Pipelines service connection) writes detection bundles + the pointer.
 # Scoped to the detections container only - least privilege vs. the whole account.
 resource "azurerm_role_assignment" "detections_publisher" {
   count                = var.publisher_principal_id == "" ? 0 : 1

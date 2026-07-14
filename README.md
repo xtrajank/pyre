@@ -49,7 +49,7 @@ Each directory has its own `README.md` that goes deep on that topic. Start at th
 
 ---
 
-## The everyday tasks (pointers)
+## Pointers
 
 - **See it work on your laptop ($0, no Azure):** [docs/local-dev.md](docs/local-dev.md) — `python tools/testlab/run_local.py`.
 - **Deploy an environment (dev or prod) to Azure:** [docs/PRODUCTION.md § 9](docs/PRODUCTION.md#9-spin-up-cloud) — provision, deploy the engine, publish detections, connect Cribl + Torq.
@@ -58,13 +58,13 @@ Each directory has its own `README.md` that goes deep on that topic. Start at th
 
 ---
 
-## What's built vs. still a stub (be honest with yourself)
+## What's built
 
 - **Built and tested:** the detection engine (routing → rule → signal → dedup/threshold → alert → dispatch), the external-DaC bundle loading + hot-reload, the local test runner, and the Terraform — **one composition you stamp out as dev/prod instances** (validates).
 - **Structurally there, not yet exercised end-to-end on real Azure:** the CI publish-to-Blob pipeline, and a first cloud `apply` (the Terraform validates but hasn't been applied — expect to debug SKU/region/quota specifics on a free trial).
 - **Deliberately out of scope for now:** log normalization (that's Cribl's job), scheduled-query detections, correlation rules, the AI triage agent, and a search UI. The architecture leaves clean seams for each — see [docs/architecture.md](docs/architecture.md) and [PANTHER_CONVERSION.md](PANTHER_CONVERSION.md).
 
-## Design principles (why it looks the way it does)
+## Design principles
 
 - **Cheap at scale:** batch everything; one Azure Function execution evaluates hundreds of logs; scale to zero when idle.
 - **No secrets in code:** every service is reached by identity (Managed Identity) or Key Vault reference, never a password in a file.

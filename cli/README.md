@@ -37,7 +37,7 @@ python cli/pyre build     # rebuild the routing index
 python cli/pyre publish   # push to Blob -> engine hot-reloads within ~45s
 ```
 
-In a wired-up CI, a `git push` to the detections repo triggers exactly this via [../.github/workflows/publish-detections.yml](../.github/workflows/publish-detections.yml).
+In a wired-up CI, a `git push` to the detections repo (Azure Repos Git) triggers exactly this via [../.azure-pipelines/publish-detections.yml](../.azure-pipelines/publish-detections.yml).
 
 ## Configuration it reads
 

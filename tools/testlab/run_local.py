@@ -12,6 +12,7 @@ Everything is the same code that runs in Azure, EXCEPT:
     python tools/testlab/run_local.py                 # Palo sample (matches + dedup)
     python tools/testlab/run_local.py --file tools/testlab/samples/cloudflare_sample.jsonl
     python tools/testlab/run_local.py --bundle .bundle # a real `pyre pull` bundle
+    python tools/testlab/run_local.py --html report.html   # also write a visual report
 """
 import argparse
 import json
@@ -58,6 +59,9 @@ def main():
                     help="local detection bundle dir (default: the offline sample DaC)")
     ap.add_argument("--file", default=os.path.join(HERE, "samples", "palo_sample.jsonl"),
                     help="newline-delimited JSON events to feed the processor")
+    ap.add_argument("--html", default=None,
+                    help="also write a self-contained HTML report (stat tiles + "
+                         "signal/alert/dispatch tables) to this path")
     args = ap.parse_args()
 
     port = _start_sink()
@@ -102,6 +106,17 @@ def main():
     print("  * matches sharing a dedup string collapsed into ONE alert (first-event-wins)")
     print("  * a match below its YAML Threshold produced a signal but NO alert")
     print("  * non-matching events produced nothing - same as Panther")
+
+    if args.html:
+        from html_report import render
+        meta = {
+            "bundle": os.path.relpath(args.bundle, REPO),
+            "file": os.path.relpath(args.file, REPO),
+            "event_count": len(events),
+        }
+        with open(args.html, "w", encoding="utf-8") as fh:
+            fh.write(render(meta, CAPTURED))
+        print(f"\nHTML report -> {args.html}")
 
 
 if __name__ == "__main__":

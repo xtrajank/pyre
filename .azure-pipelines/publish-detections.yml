@@ -1,0 +1,115 @@
+# publish-detections: pulls the external DaC repo, validates/build the bundle,
+# and publishes it to Blob. Warm workers hot-reload it within
+# refresh_interval_seconds (default 45s) - no redeploy. This is the "push ->
+# live" pipeline from docs/architecture.md, § "Detection freshness".
+#
+# ADO equivalent of the old .github/workflows/publish-detections.yml. The
+# GitHub version needed a PAT + a `repository_dispatch` snippet living IN the
+# DaC repo to notify this pipeline. Because the DaC repo is an Azure Repos Git
+# repo, ADO can trigger natively off it via the `resources.repositories` block
+# below - no snippet needed in the DaC repo, and no PAT if it's in the same
+# ADO org (the pipeline's own OAuth token can read it - see § one-time setup).
+#
+# ---------------------------------------------------------------------------
+# One-time setup in Azure DevOps (do this before the first run):
+#   1. Pipelines -> New pipeline -> this repo -> "Existing Azure Pipelines YAML
+#      file" -> /.azure-pipelines/publish-detections.yml.
+#   2. Below, set `resources.repositories.dac.name` to "<ADOProject>/<DaCRepo>"
+#      (same org; a different org needs a service connection of type
+#      "Azure Repos Git" instead of a same-org repository resource).
+#   3. Create variable groups `pyre-dev` and `pyre-prod` (Pipelines -> Library),
+#      each holding BUNDLE_BLOB_ACCOUNT_URL (e.g.
+#      https://pyredevstor.blob.core.windows.net) for that environment. If the
+#      DaC repo needs a real PAT (cross-org case), link the variable group to
+#      the environment's `<name_prefix>-ci-kv` vault instead of typing it in -
+#      that vault is CI-only (infra/main.tf module.ci_keyvault); it is a
+#      SEPARATE vault from the engine's `<name_prefix>-kv`, which this pipeline
+#      is never granted access to. Set the secret as DAC_TOKEN.
+#   4. Create ADO Environments named `pyre-dev` and `pyre-prod` (Pipelines ->
+#      Environments) and add approval checks on `pyre-prod` if a human gate is
+#      wanted before a bundle reaches production.
+#   5. Create an Azure Resource Manager service connection using Workload
+#      Identity Federation (Project Settings -> Service connections -> New ->
+#      Azure Resource Manager -> Workload identity federation). This is ADO's
+#      equivalent of the old GitHub OIDC SP - no client secret stored anywhere.
+#      Grant its principal ID to Terraform's `publisher_principal_id` (infra/
+#      envs/<env>.tfvars) and re-apply - that's what grants Storage Blob Data
+#      Contributor on the `detections` container, scoped least-privilege.
+#   6. If the DaC repo is in the SAME ADO org/project: Project Settings ->
+#      Repositories -> <DaC repo> -> Security -> grant "<Project> Build Service
+#      (<Org>)" Read access, and tick "Allow scripts to access the OAuth
+#      token" on this pipeline (Edit -> ... -> Triggers -> this pipeline ->
+#      Allow scripts... under Options). Then no PAT is needed at all - see the
+#      pull step below.
+# ---------------------------------------------------------------------------
+
+resources:
+  repositories:
+    - repository: dac                        # alias; not checked out here (pyre pull clones it)
+      type: git                              # Azure Repos Git
+      name: <ADOProject>/<DaCRepoName>       # <-- set this
+      ref: refs/heads/main
+      trigger:
+        branches:
+          include: [main]                    # any push to DaC main fires this pipeline
+
+parameters:
+  - name: env
+    displayName: Target environment
+    type: string
+    default: dev
+    values: [dev, prod]
+
+pool:
+  vmImage: ubuntu-latest
+
+jobs:
+  - deployment: publish
+    displayName: Pull, validate, build, publish
+    environment: pyre-${{ parameters.env }}   # approval gate lives on the ADO Environment
+    variables:
+      - group: pyre-${{ parameters.env }}     # BUNDLE_BLOB_ACCOUNT_URL, optional DAC_TOKEN
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+
+            - task: UsePythonVersion@0
+              inputs: { versionSpec: "3.11" }
+              displayName: Use Python 3.11
+
+            - script: pip install pyyaml azure-identity azure-storage-blob
+              displayName: Install deps
+
+            # Same-org Azure Repos Git DaC repo: no PAT needed, the pipeline's
+            # own OAuth token can clone it (see one-time setup step 6). For a
+            # cross-org/private DaC repo, set DAC_TOKEN from the variable group
+            # instead (secret) and drop the SYSTEM_ACCESSTOKEN line.
+            - script: |
+                set -eu
+                export DAC_TOKEN="$SYSTEM_ACCESSTOKEN"
+                ./cli/pyre pull
+                ./cli/pyre validate
+                ./cli/pyre build
+              displayName: pull + validate + build bundle
+              env:
+                SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                DAC_REF: $(Build.SourceVersion)   # pins the exact DaC commit that triggered this run
+
+            - task: AzureCLI@2
+              displayName: publish bundle -> Blob
+              inputs:
+                azureSubscription: pyre-publisher   # <-- the Workload Identity Federation service connection from setup step 5
+                scriptType: bash
+                scriptLocation: inlineScript
+                # AzureCLI@2 logs in via the service connection before running this
+                # script; pyre publish's DefaultAzureCredential() picks that same
+                # session up (the AzureCliCredential fallback) - no env vars needed.
+                inlineScript: |
+                  set -eu
+                  ./cli/pyre publish --account-url "$(BUNDLE_BLOB_ACCOUNT_URL)"
+
+            - script: |
+                echo "publish complete for ${{ parameters.env }}; workers hot-reload within refresh_interval_seconds"
+              displayName: Done

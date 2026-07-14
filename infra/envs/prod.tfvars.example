@@ -26,5 +26,11 @@ max_throughput_units   = 20
 
 # Prod really wants these set:
 # cribl_sender_principal_id = "<object-id-of-cribl-identity>"
-# publisher_principal_id    = "<object-id-of-ci-oidc-sp>"
+# publisher_principal_id    = "<object-id-of-the-ADO-workload-identity-federation-service-connection>"
 # signals_sink_url          = "https://<cribl-http-source>"
+
+# Torq destinations (config/destinations.yaml). URLs only - the tokens
+# (torq-dev-token / torq-prod-token) go in Key Vault, not here:
+#   az keyvault secret set --vault-name <name_prefix>-kv --name torq-prod-token --value <token>
+# torq_dev_url  = "https://<torq-webhook-dev>"
+# torq_prod_url = "https://<torq-webhook-prod>"

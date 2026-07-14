@@ -27,4 +27,9 @@ _processor = Processor(_config)
 def detect(events: list[func.EventHubEvent]) -> None:
     """One invocation handles a whole batch. Cost lever: batch size in host.json."""
     raw = [e.get_body().decode("utf-8") for e in events]
-    _processor.process_batch(raw)
+    # partition_key + sequence_number is stable across an Event Hubs redelivery
+    # (a checkpoint retry redelivers the same messages), so it's what the
+    # processor's idempotency check keys on. Falls back to a content hash
+    # (inside process_batch) if a given event lacks one.
+    event_ids = [f"{e.partition_key}:{e.sequence_number}" for e in events]
+    _processor.process_batch(raw, event_ids=event_ids)

@@ -38,4 +38,4 @@ def test_my_detection_matches():
     assert m.rule({"some_field": "bad value"}) is True
 ```
 
-CI runs `pyre validate` + `pyre test` on every PR — see [../.github/workflows/ci.yml](../.github/workflows/ci.yml).
+CI runs `pyre validate` + `pyre test` on every PR — see [../.azure-pipelines/ci.yml](../.azure-pipelines/ci.yml).

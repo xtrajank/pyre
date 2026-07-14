@@ -1,0 +1,61 @@
+# CI: validates the detections bundle + runs the engine/detection test suite,
+# and checks the Terraform formatting/validity. Azure DevOps equivalent of the
+# old .github/workflows/ci.yml (this repo's own tests - not the DaC publish
+# pipeline; that one is publish-detections.yml).
+#
+# Wire up in ADO: Pipelines -> New pipeline -> point at this repo -> "Existing
+# Azure Pipelines YAML file" -> /.azure-pipelines/ci.yml. Runs on every push to
+# main and every PR into it.
+
+trigger:
+  branches:
+    include: [main]
+
+pr:
+  branches:
+    include: ["*"]
+
+pool:
+  vmImage: ubuntu-latest
+
+jobs:
+  - job: detections
+    displayName: Validate + test detections/engine
+    steps:
+      - task: UsePythonVersion@0
+        inputs: { versionSpec: "3.11" }
+        displayName: Use Python 3.11
+
+      - script: pip install pyyaml pytest
+        displayName: Install deps
+
+      - script: ./cli/pyre validate
+        displayName: pyre validate
+
+      - script: ./cli/pyre build
+        displayName: pyre build
+
+      - script: ./cli/pyre test
+        displayName: pyre test
+
+  - job: terraform
+    displayName: Terraform fmt + validate
+    steps:
+      # Installed directly (no marketplace extension dependency) so this runs
+      # on any ADO org with no extra setup. If your org has the "Terraform"
+      # marketplace extension installed, swap this for TerraformInstaller@1.
+      - script: |
+          set -eu
+          TF_VERSION=1.7.5   # keep in sync with infra/providers.tf required_version
+          curl -sL "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip" -o tf.zip
+          sudo unzip -o tf.zip -d /usr/local/bin
+          terraform -version
+        displayName: Install Terraform
+
+      - script: |
+          set -eu
+          terraform -chdir=infra fmt -check -recursive
+          terraform -chdir=infra init -backend=false
+          terraform -chdir=infra validate
+          echo "terraform plan runs at deploy time, with real cloud creds (a service connection) - see docs/PRODUCTION.md"
+        displayName: fmt + validate

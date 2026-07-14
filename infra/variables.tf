@@ -62,7 +62,7 @@ variable "cribl_sender_principal_id" {
 }
 variable "publisher_principal_id" {
   type    = string
-  default = "" # CI OIDC service principal that runs `pyre publish`
+  default = "" # Azure Pipelines Workload Identity Federation service connection that runs `pyre publish`
 }
 
 # --- Engine tuning ------------------------------------------------------------
@@ -93,6 +93,14 @@ variable "signals_sink_url" {
 variable "mock_dest_url" {
   type    = string
   default = "" # optional non-Torq alert sink (webhook/test mock)
+}
+variable "torq_dev_url" {
+  type    = string
+  default = "" # Torq webhook URL for torq_dev (config/destinations.yaml). Not secret; the token below is.
+}
+variable "torq_prod_url" {
+  type    = string
+  default = "" # Torq webhook URL for torq_prod
 }
 
 # --- Event Hubs scaling (only used when cost_profile = "scale") ---------------

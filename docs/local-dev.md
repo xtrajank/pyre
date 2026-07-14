@@ -50,6 +50,8 @@ python tools/testlab/run_local.py --file tools/testlab/samples/cloudflare_sample
 
 One SQLi request matches → **1 signal, 0 alerts**, because that detection sets `Threshold: 5`. A single match is recorded but doesn't page anyone — which is exactly why signals and alerts are separate.
 
+Add `--html report.html` to either command to also get a browser-viewable report (stat tiles + a table each for signals/alerts/dispatched) instead of reading console output.
+
 ## 4. Change a detection and watch it take effect
 
 - Open `tests/fixtures/sample_dac/cloudflare/cloudflare_http_sqli.yml`, change `Threshold: 5` to `1`, re-run the Cloudflare command → now it alerts. In production, that same edit is a `git push` to your detections repo.

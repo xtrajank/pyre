@@ -6,7 +6,7 @@ Never used Terraform? Read the [glossary](../docs/GLOSSARY.md) entries for *Terr
 
 ## One composition, many instances
 
-There is **one** definition of the whole system (the `.tf` files in this folder). You deploy it as many times as you want — a dev instance, a prod instance, a per-team instance — where **an "instance" is just a different `.tfvars` file plus its own state key**. dev is simply prod with cheaper values. This is how real products manage environments: not copies of the code, but one code base parameterized by config.
+There is **one** definition of the whole system (the `.tf` files in this folder). You deploy it as many times as you want — a dev instance, a prod instance, a per-team instance — where **an "instance" is just a different `.tfvars` file plus its own state key**. dev is simply prod with cheaper values.
 
 ```
 infra/
@@ -47,7 +47,7 @@ Both use **Managed Identity + Key Vault** (never passwords in files) and are ful
 | `storage` | Storage account with `checkpoints`, `bundle`, `detections` containers | `detections` holds published detection bundles; `bundle` is the Function App's own deploy package. A CI identity may write `detections` (`publisher_principal_id`). |
 | `eventhub` | Event Hubs namespace + the `logs-in` hub, sized from `config/sources.yaml` | Grants the engine's MI *receive* and Cribl's identity *send* — no access keys. |
 | `redis` | Azure Cache for Redis + a **data-plane access policy** for the engine's MI | That access policy is what lets the engine actually use Redis (Entra auth, no keys). Biggest single cost. |
-| `keyvault` | Key Vault + a role letting the engine read secrets | Real secrets (Torq token) live here; read by reference. |
+| `keyvault` | **Two** Key Vaults (the module is instantiated twice) | `module.keyvault` holds engine runtime secrets (Torq tokens, Cribl creds) - readable only by the processor MI. `module.ci_keyvault` holds CI-only secrets - readable only by the publisher service connection. Two vaults, not one with two roles, so a compromised identity on one side can't read the other's secrets. |
 | `function_app` | The Flex Consumption Function App (the processor) + all its settings | Reads Event Hub/Redis/Key Vault/Blob **by identity**. |
 | `monitoring` | Log Analytics workspace + Application Insights | Where the engine's logs and metrics land. |
 

@@ -33,6 +33,14 @@ variable "mock_dest_url" {
   type    = string
   default = "" # optional non-Torq alert sink (e.g. a webhook or the test mock); "" in prod
 }
+variable "torq_dev_url" {
+  type    = string
+  default = "" # Torq webhook URL for the torq_dev destination (config/destinations.yaml url_env: TORQ_DEV_URL). Not a secret - the token is.
+}
+variable "torq_prod_url" {
+  type    = string
+  default = "" # Torq webhook URL for the torq_prod destination (config/destinations.yaml url_env: TORQ_PROD_URL)
+}
 variable "max_event_batch_size" {
   type    = number
   default = 256 # ceiling of events per invocation. 1 = single-event; 256 = batched (default)

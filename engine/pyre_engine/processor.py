@@ -3,12 +3,15 @@ detection processor. Reused unchanged by the future scheduled-query module
 (which just feeds it query-result rows instead of Event Hub events).
 
 Order per event mirrors Panther exactly:
-  enrich -> select detections for log_type -> rule() -> on match:
-  ALWAYS write signal -> dedup/threshold/unique -> storm-limit -> alert+dispatch.
+  idempotency check -> enrich -> select detections for log_type -> rule() ->
+  on match: ALWAYS write signal -> dedup/threshold/unique -> storm-limit ->
+  alert+dispatch.
 
 Everything is batched and Redis ops are pipelined for cost at scale.
 """
+import hashlib
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -19,8 +22,17 @@ from .dac import source_from_config
 from .dedup import StateStore
 from .enrichment import Enricher
 from .dispatch import Dispatcher
+from .event import Event
 from .signals import SignalWriter
 from .models import Signal, Alert
+
+log = logging.getLogger("pyre.processor")
+
+# Cribl doesn't use one universal metadata-field prefix the way Panther's `p_`
+# convention did, so these routing/time fields are captured explicitly on
+# every signal; anything still prefixed `p_` (e.g. p_enrichment) is swept up
+# alongside them below.
+_LOG_METADATA_KEYS = ("dataset", "_time")
 
 
 def _load_enabled_ids() -> set[str] | None:
@@ -28,6 +40,15 @@ def _load_enabled_ids() -> set[str] | None:
     # Here: optional env override; None means "trust the YAML Enabled flag".
     raw = os.environ.get("ENABLED_DETECTION_IDS")
     return set(raw.split(",")) if raw else None
+
+
+def _content_hash(raw: str) -> str:
+    # Fallback idempotency key when the caller has no transport-level event id
+    # (e.g. local/testlab runs). Event Hubs at-least-once redelivery resends the
+    # exact same bytes, so a content hash catches that case too; the production
+    # path (function_app.py) passes the real partition+sequence_number instead,
+    # which also distinguishes two genuinely different events with identical bodies.
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 class Processor:
@@ -48,18 +69,38 @@ class Processor:
         self.dispatcher = Dispatcher(cfg.destinations_path)
         self.signals = SignalWriter(cfg.signals_sink_url)
 
-    def process_batch(self, raw_events: list[str]) -> None:
+    def process_batch(self, raw_events: list[str], event_ids: list[str] | None = None) -> None:
         registry = self.loader.get()          # hot-reloads on a DaC push / enable flip
         hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+
+        # Phase 0: idempotency. Event Hubs is at-least-once, so a checkpoint retry
+        # can redeliver a batch we already processed. One extra pipelined round-trip
+        # per BATCH (not per event) marks each event id "seen"; anything already
+        # seen within the window is skipped below so signals/dedup counters can't
+        # be double-written by a redelivery.
+        id_pipe = self.state.pipeline()
+        candidates = []  # (event_id, raw)
+        for idx, raw in enumerate(raw_events):
+            eid = None
+            if event_ids is not None and idx < len(event_ids):
+                eid = event_ids[idx]
+            eid = eid or _content_hash(raw)
+            self.state.is_new_event(id_pipe, eid)
+            candidates.append((eid, raw))
+        seen_results = id_pipe.execute()
+
         pipe = self.state.pipeline()
         pending = []  # matches needing an alert decision after the pipeline runs
 
-        for raw in raw_events:
+        for (eid, raw), is_new in zip(candidates, seen_results):
+            if not is_new:
+                log.info("skipping already-processed event %s (redelivery)", eid)
+                continue
             try:
-                event = json.loads(raw)
+                event = Event(json.loads(raw))
             except json.JSONDecodeError:
                 continue
-            log_type = event.get("p_log_type")
+            log_type = event.get("dataset")
             if not log_type:
                 continue
             event = self.enricher.enrich(event)
@@ -69,28 +110,45 @@ class Processor:
                     if not det.rule(event):
                         continue
                 except Exception:
-                    # detection error: log to Log Analytics; keep processing others
+                    log.exception("detection %s raised while evaluating a %s event; skipping it for this event",
+                                  det.id, log_type)
                     continue
 
                 dedup_str = (det.dedup(event) or det.title(event))[:1000]
                 # ALWAYS a signal on match
                 self.signals.add_signal(Signal(
                     detection_id=det.id, log_type=log_type, dedup_string=dedup_str,
-                    event_time=event.get("p_event_time", ""), event_ref=event,
-                    p_fields={k: v for k, v in event.items() if k.startswith("p_")},
+                    event_time=event.get("_time", ""), event_ref=event,
+                    p_fields={
+                        **{k: event[k] for k in _LOG_METADATA_KEYS if k in event},
+                        **{k: v for k, v in event.items() if k.startswith("p_")},
+                    },
                 ))
                 if not det.create_alert:
                     continue
 
-                self.state.bump_dedup(pipe, det.id, dedup_str, det.dedup_period_seconds)
-                pending.append((det, event, dedup_str))
+                # A detection may define unique(event) (Panther's "N distinct
+                # values" thresholding, e.g. 5+ different source IPs) instead of
+                # counting every match. Its presence picks the counting mode.
+                unique_val = det.unique(event)
+                if unique_val is not None:
+                    self.state.bump_unique(pipe, det.id, dedup_str, str(unique_val), det.dedup_period_seconds)
+                    pending.append((det, event, dedup_str, "unique"))
+                else:
+                    self.state.bump_dedup(pipe, det.id, dedup_str, det.dedup_period_seconds)
+                    pending.append((det, event, dedup_str, "count"))
 
-        results = pipe.execute()  # one round-trip for all dedup bumps
+        results = pipe.execute()  # one round-trip for all dedup/unique bumps
 
-        # Interpret pipeline results (incr, expire pairs) and decide alerts.
+        # Interpret pipeline results and decide alerts. "count" mode pipelines
+        # [incr, expire] (want the incr result); "unique" mode pipelines
+        # [pfadd, expire, pfcount] (want the pfcount result).
         i = 0
-        for det, event, dedup_str in pending:
-            count = results[i]; i += 2  # skip the paired expire result
+        for det, event, dedup_str, mode in pending:
+            if mode == "unique":
+                count = results[i + 2]; i += 3
+            else:
+                count = results[i]; i += 2
             if count < det.threshold:
                 continue
             if self.state.alert_exists(det.id, dedup_str):
@@ -99,13 +157,15 @@ class Processor:
                 alert_id=str(uuid.uuid4()), detection_id=det.id,
                 title=det.title(event), severity=det.severity(event),
                 dedup_string=dedup_str, context=det.alert_context(event),
-                first_event_time=event.get("p_event_time", ""),
+                first_event_time=event.get("_time", ""),
             )
             # atomic claim of the alert marker (first-event-wins)
             if not self.state.register_alert(det.id, dedup_str, alert.alert_id, det.dedup_period_seconds):
                 continue
             if not self.state.storm_ok(det.id, hour, self.cfg.storm_limit_per_hour):
-                # storm limit hit: keep the signal, skip dispatch, raise a system error
+                # storm limit hit: keep the signal, skip dispatch, surface it loudly
+                log.error("storm limit hit for detection %s (>%s alerts in hour %s); alert dropped, signal retained",
+                          det.id, self.cfg.storm_limit_per_hour, hour)
                 continue
             routes = det.destinations(event) or _default_routes(self.cfg.env)
             alert.destinations = routes

@@ -4,20 +4,20 @@
 
 sources:
   - name: palo_traffic
-    log_types: [Palo.Traffic]
-    hub: palo-in            # dedicated hub: isolates Palo's firehose
-    partitions: 32          # parallelism ceiling for this source
+    log_types: [SEC_Network_Palo_Alto_Traffic]
+    hub: palo-traffic-in            # dedicated hub: isolates Palo's firehose
+    partitions: 32                  # parallelism ceiling for this source
     retention_hours: 24
 
-  - name: cloudflare_http
-    log_types: [Cloudflare.HttpRequest]
+  - name: cloudflare
+    log_types: [SEC_Web_Cloudflare]
     hub: cloudflare-in
     partitions: 16
     retention_hours: 24
 
   # Everything lower-volume can share one hub.
   - name: shared_default
-    log_types: [Okta.SystemLog, AWS.CloudTrail]
-    hub: logs-in
+    log_types: [SEC_XDR_AgentsInfo, SEC_Auth_Entra_Signin]
+    hub: default-logs-in
     partitions: 8
     retention_hours: 24

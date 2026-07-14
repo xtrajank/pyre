@@ -15,6 +15,25 @@ Design for scale/cost:
 """
 import redis
 from azure.identity import DefaultAzureCredential
+from redis.credentials import CredentialProvider
+
+
+class _EntraCredentialProvider(CredentialProvider):
+    """Fetches a fresh Entra token whenever redis-py opens a NEW connection
+    (pool growth, or a reconnect after a network blip), instead of the old
+    fixed-password approach where a token grabbed once at cold start would
+    silently start failing every Redis call once it expired - exactly the
+    failure mode a long-warm worker under sustained load would hit."""
+
+    def __init__(self):
+        self._cred = DefaultAzureCredential()
+        self._token = None
+
+    def get_credentials(self):
+        import time
+        if self._token is None or self._token.expires_on - time.time() < 300:
+            self._token = self._cred.get_token("https://redis.azure.com/.default")
+        return "", self._token.token
 
 
 class StateStore:
@@ -24,9 +43,9 @@ class StateStore:
         if client is not None:
             self._r = client
         elif use_entra:
-            token = DefaultAzureCredential().get_token("https://redis.azure.com/.default")
             self._r = redis.Redis(host=host, port=port, ssl=True,
-                                  username="", password=token.token, decode_responses=True)
+                                  credential_provider=_EntraCredentialProvider(),
+                                  decode_responses=True)
         else:
             self._r = redis.Redis(host=host, port=port, ssl=True, decode_responses=True)
 
@@ -53,6 +72,16 @@ class StateStore:
         key = f"uniq:{det_id}:{dedup_str}"
         pipe.pfadd(key, value)
         pipe.expire(key, ttl, nx=True)
+
+    def bump_unique(self, pipe, det_id: str, dedup_str: str, value: str, ttl: int) -> None:
+        """Like add_unique, but also pipelines a pfcount so the processor can read
+        the updated distinct-value count back in the SAME round-trip (the shape
+        the batch loop needs to decide unique-mode thresholds without an extra
+        per-match Redis call)."""
+        key = f"uniq:{det_id}:{dedup_str}"
+        pipe.pfadd(key, value)
+        pipe.expire(key, ttl, nx=True)
+        pipe.pfcount(key)
 
     def unique_count(self, det_id: str, dedup_str: str) -> int:
         return int(self._r.pfcount(f"uniq:{det_id}:{dedup_str}"))

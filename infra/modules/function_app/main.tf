@@ -61,8 +61,14 @@ resource "azurerm_function_app_flex_consumption" "app" {
     # high value does NOT delay alerts at low volume. The processor handles any
     # size unchanged.
     "AzureFunctionsJobHost__extensions__eventHubs__maxEventBatchSize" = tostring(var.max_event_batch_size)
-    # Secrets via Key Vault references:
-    TORQ_DEV_TOKEN                        = "@Microsoft.KeyVault(SecretUri=${var.kv_uri}secrets/torq-dev-token/)"
+    # Torq destinations (config/destinations.yaml torq_dev/torq_prod): the URL
+    # isn't a secret and is a plain variable; the token is, via a Key Vault
+    # reference - this is the engine's runtime vault (module.keyvault), never
+    # the CI-only vault.
+    TORQ_DEV_URL   = var.torq_dev_url
+    TORQ_DEV_TOKEN = "@Microsoft.KeyVault(SecretUri=${var.kv_uri}secrets/torq-dev-token/)"
+    TORQ_PROD_URL  = var.torq_prod_url
+    TORQ_PROD_TOKEN                       = "@Microsoft.KeyVault(SecretUri=${var.kv_uri}secrets/torq-prod-token/)"
     SIGNALS_SINK_URL                      = var.signals_sink_url
     APPLICATIONINSIGHTS_CONNECTION_STRING = var.app_insights_conn
   }

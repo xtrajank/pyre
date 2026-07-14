@@ -60,14 +60,31 @@ module "storage" {
 }
 
 module "keyvault" {
-  source                 = "./modules/keyvault"
-  name_prefix            = var.name_prefix
-  location               = var.location
-  resource_group_name    = var.resource_group_name
-  pe_subnet_id           = module.network.pe_subnet_id
-  dns_zone_id            = module.network.dns_zone_ids["keyvault"]
-  processor_principal_id = module.identity.principal_id
-  tags                   = local.tags
+  source               = "./modules/keyvault"
+  name_prefix          = var.name_prefix
+  location             = var.location
+  resource_group_name  = var.resource_group_name
+  pe_subnet_id         = module.network.pe_subnet_id
+  dns_zone_id          = module.network.dns_zone_ids["keyvault"]
+  reader_principal_ids = [module.identity.principal_id] # engine runtime secrets: Torq tokens, Cribl creds
+  tags                 = local.tags
+}
+
+# A SEPARATE vault for CI-only secrets (e.g. a cross-org DaC PAT, if the DaC
+# repo ever isn't reachable via the pipeline's own OAuth token - see
+# .azure-pipelines/publish-detections.yml). Only the publisher identity is
+# granted a role here; it never touches module.keyvault above, and the
+# processor Managed Identity never touches this one. See infra/README.md.
+module "ci_keyvault" {
+  source               = "./modules/keyvault"
+  name_prefix          = var.name_prefix
+  location             = var.location
+  resource_group_name  = var.resource_group_name
+  pe_subnet_id         = module.network.pe_subnet_id
+  dns_zone_id          = module.network.dns_zone_ids["keyvault"]
+  name_suffix          = "ci-kv"
+  reader_principal_ids = var.publisher_principal_id == "" ? [] : [var.publisher_principal_id]
+  tags                 = local.tags
 }
 
 module "redis" {
@@ -120,6 +137,8 @@ module "function_app" {
   storm_limit               = var.storm_limit
   signals_sink_url          = var.signals_sink_url
   mock_dest_url             = var.mock_dest_url
+  torq_dev_url              = var.torq_dev_url
+  torq_prod_url             = var.torq_prod_url
   max_event_batch_size      = var.max_event_batch_size
   tags                      = local.tags
 }

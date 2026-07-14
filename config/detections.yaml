@@ -14,6 +14,9 @@
 dac:
   # Where the detections live. Point this at your DaC repo (panther-analysis or a
   # private fork). `path` is the subfolder inside that repo holding the detections.
+  # Shown here is the public example; an Azure Repos Git DaC repo looks like
+  # https://dev.azure.com/<org>/<project>/_git/<repo> (see .azure-pipelines/
+  # publish-detections.yml for how CI clones it with no PAT, same-org).
   repo: https://github.com/panther-labs/panther-analysis
   ref: main                 # branch/tag/commit. Pin a tag or sha for reproducible prod.
   path: rules               # subfolder in the repo that contains the detections

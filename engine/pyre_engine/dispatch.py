@@ -4,9 +4,12 @@ adding an INSTANCE is pure config (config/destinations.yaml).
 Kinds supported: mock (test), webhook (generic), torq (Torq case).
 Secrets (tokens) are resolved from env (Key Vault references), never inlined.
 """
+import logging
 import os
 import yaml
 import requests
+
+log = logging.getLogger("pyre.dispatch")
 
 
 class Dispatcher:
@@ -51,6 +54,10 @@ class Dispatcher:
 
     def _torq(self, dest, alert):
         token = os.environ.get(dest["token_env"])  # Key Vault reference
+        if not token:
+            log.error("torq dispatch skipped for alert %s: token env %s is unset",
+                      alert.alert_id, dest["token_env"])
+            return
         url = os.environ.get(dest.get("url_env", ""), dest.get("url", ""))
         requests.post(url, json=self._payload(alert),
                       headers={"Authorization": f"Bearer {token}"}, timeout=10)

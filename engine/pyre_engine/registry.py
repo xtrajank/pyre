@@ -60,6 +60,13 @@ class Detection:
     def destinations(self, event):
         return self._call("destinations", event, default=None)
 
+    def unique(self, event):
+        """Optional Panther-style unique() hook: return the value to count
+        DISTINCT occurrences of (e.g. source IP) instead of counting every
+        match. None (the default - no unique() function on the module) keeps
+        the normal total-count threshold behavior."""
+        return self._call("unique", event, default=None)
+
 
 class Registry:
     def __init__(self):

@@ -22,12 +22,17 @@ pip install -r engine/requirements.txt fakeredis   # one-time
 python tools/testlab/run_local.py                   # Palo sample: matches + dedup
 python tools/testlab/run_local.py --file tools/testlab/samples/cloudflare_sample.jsonl
 python tools/testlab/run_local.py --bundle .bundle  # against a real `pyre pull` bundle
+python tools/testlab/run_local.py --html report.html  # also write a visual report
 ```
 
 It reads a detection **bundle** (default: the offline test fixture) and a `.jsonl` of logs, runs `engine/pyre_engine/processor.py` over them, and prints:
 - **SIGNALS** — one per detection match (the audit trail),
 - **ALERTS** — what survived threshold + dedup,
 - **DISPATCHED** — what was sent to the (mock) destination.
+
+Add `--html <path>` to also write a self-contained HTML report (stat tiles for
+event/signal/alert/dispatch counts, plus a table for each) — open it in a
+browser instead of reading console output. See `testlab/html_report.py`.
 
 Full walkthrough with what each number means: [docs/local-dev.md](../docs/local-dev.md).
 

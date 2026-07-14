@@ -18,8 +18,8 @@ class SignalWriter:
     def add_signal(self, signal) -> None:
         self._buf.append({
             "_dataset": "pyre_signals",
-            "detection_id": signal.detection_id, "p_log_type": signal.log_type,
-            "dedup": signal.dedup_string, "p_event_time": signal.event_time,
+            "detection_id": signal.detection_id, "dataset": signal.log_type,
+            "dedup": signal.dedup_string, "_time": signal.event_time,
             "p_fields": signal.p_fields, "event": signal.event_ref,
         })
 

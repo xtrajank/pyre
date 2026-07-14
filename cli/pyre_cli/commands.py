@@ -95,10 +95,24 @@ def pull(args):
     return 0
 
 
+def _declared_log_types() -> set:
+    """Every log_types value declared across config/sources.yaml - what
+    Terraform has actually sized an Event Hub for. A detection whose LogTypes
+    aren't in this set will load fine but can never see a matching event
+    (wrong dataset name, or its source hasn't been added to sources.yaml)."""
+    path = os.path.join(REPO, "config", "sources.yaml")
+    if not os.path.exists(path):
+        return set()
+    with open(path) as fh:
+        data = yaml.safe_load(fh) or {}
+    return {lt for s in (data.get("sources") or []) for lt in (s.get("log_types") or [])}
+
+
 def validate(args):
     if not os.path.isdir(_bundle_dir()):
         print("validate: no bundle. Run `pyre pull` first."); return 1
     errors = 0
+    declared = _declared_log_types()
     for path, meta in _iter_meta():
         if not isinstance(meta, dict):
             continue
@@ -117,6 +131,13 @@ def validate(args):
         py = os.path.join(os.path.dirname(path), os.path.basename(meta.get("Filename", "")))
         if not os.path.exists(py):
             print(f"ERROR {path}: Filename {meta.get('Filename')} not found"); errors += 1
+        # Only enforced when sources.yaml actually declares something - an empty/
+        # missing file disables the check rather than flagging every detection.
+        if declared:
+            for lt in meta.get("LogTypes") or []:
+                if lt not in declared:
+                    print(f"ERROR {path}: LogTypes value '{lt}' has no matching entry in "
+                          f"config/sources.yaml (no Event Hub is sized for it)"); errors += 1
     print("validate: OK" if not errors else f"validate: {errors} error(s)")
     return 1 if errors else 0
 

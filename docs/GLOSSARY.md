@@ -91,7 +91,7 @@ Written for someone brand new to security operations, Azure, and Terraform. Skim
 
 **RBAC (Role-Based Access Control)** — granting an identity a specific role on a specific resource (e.g. "this MI may *read* blobs in that container"). Least privilege: each identity gets only what it needs.
 
-**Key Vault** — Azure's secrets safe. Real secrets (like the Torq API token) live here; the Function App reads them at runtime by identity. Nothing sensitive sits in a config file.
+**Key Vault** — Azure's secrets safe. pyre deploys **two per instance**: the engine's own vault (`<name_prefix>-kv`, real secrets like the Torq API token, read by the Function App at runtime by identity) and a separate CI-only vault (`<name_prefix>-ci-kv`, only for secrets the publish pipeline needs, e.g. a cross-org DaC PAT). Two vaults so a compromised identity on one side can't read the other's secrets. Nothing sensitive sits in a config file either way.
 
 **Private endpoint** — a setting that makes an Azure service reachable *only* from inside a private network, never the public internet. Maximally secure, but it means your laptop can't reach it, and each one costs ~$7/month. pyre uses them everywhere in both dev and prod — nothing is on the internet.
 
@@ -167,6 +167,6 @@ Written for someone brand new to security operations, Azure, and Terraform. Skim
 
 **fakeredis** — a pretend, in-memory Redis used only for local testing, so you don't need a real Redis to run the engine on your laptop.
 
-**OIDC** — a way for automation (like GitHub Actions) to authenticate to Azure without storing a password, using short-lived tokens. Used by the publish pipeline.
+**OIDC / Workload Identity Federation** — a way for automation (an Azure Pipelines run, in this repo) to authenticate to Azure without storing a password, using short-lived federated tokens. The Azure DevOps service connection type is "Azure Resource Manager (Workload identity federation)". Used by the publish pipeline.
 
 **PAT (Personal Access Token)** — a Git access token, used only to clone a *private* detections repo. It never touches the running engine.

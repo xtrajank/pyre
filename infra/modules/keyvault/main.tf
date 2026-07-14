@@ -1,9 +1,15 @@
 # Secrets safe. Private endpoint, no public access, RBAC (not access policies).
-# Holds the Torq token and any Cribl credentials; the processor reads them by
-# reference (never inlined). purge_protection guards against accidental deletion.
+# This module is instantiated TWICE (see infra/main.tf): one vault for the
+# engine's runtime secrets (Torq tokens, Cribl creds - read by the processor
+# Managed Identity), and a SEPARATE vault for CI-only secrets (read by the
+# Azure Pipelines publisher service connection). Two vaults, not one with two
+# roles, so a compromised identity on one side can never read the other
+# side's secrets - the processor MI is never granted a role on the CI vault,
+# and the publisher identity is never granted a role on the engine vault.
+# purge_protection guards against accidental deletion.
 data "azurerm_client_config" "current" {}
 resource "azurerm_key_vault" "kv" {
-  name                          = "${var.name_prefix}-kv"
+  name                          = "${var.name_prefix}-${var.name_suffix}"
   location                      = var.location
   resource_group_name           = var.resource_group_name
   tenant_id                     = data.azurerm_client_config.current.tenant_id
@@ -14,25 +20,27 @@ resource "azurerm_key_vault" "kv" {
   tags                          = var.tags
 }
 resource "azurerm_private_endpoint" "pe" {
-  name                = "${var.name_prefix}-kv-pe"
+  name                = "${var.name_prefix}-${var.name_suffix}-pe"
   location            = var.location
   resource_group_name = var.resource_group_name
   subnet_id           = var.pe_subnet_id
   private_service_connection {
-    name                           = "kv"
+    name                           = var.name_suffix
     private_connection_resource_id = azurerm_key_vault.kv.id
     subresource_names              = ["vault"]
     is_manual_connection           = false
   }
   private_dns_zone_group {
-    name                 = "kv"
+    name                 = var.name_suffix
     private_dns_zone_ids = [var.dns_zone_id]
   }
   tags = var.tags
 }
-# Processor identity may read secrets (Torq token, Cribl creds).
+# One role assignment per granted reader - see reader_principal_ids for why
+# this is a list instead of a single hardcoded identity.
 resource "azurerm_role_assignment" "secrets_user" {
+  for_each             = toset(var.reader_principal_ids)
   scope                = azurerm_key_vault.kv.id
   role_definition_name = "Key Vault Secrets User"
-  principal_id         = var.processor_principal_id
+  principal_id         = each.value
 }

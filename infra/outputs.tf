@@ -20,6 +20,10 @@ output "log_analytics_workspace" {
   description = "Where the engine's logs/metrics land (portal -> this -> Logs)."
 }
 output "key_vault_name" {
-  value       = "${var.name_prefix}-kv"
-  description = "Store the Torq token here: az keyvault secret set --vault-name <this> ..."
+  value       = module.keyvault.name
+  description = "Engine runtime secrets (Torq tokens, Cribl creds). Store them here: az keyvault secret set --vault-name <this> ..."
+}
+output "ci_key_vault_name" {
+  value       = module.ci_keyvault.name
+  description = "CI-only secrets (e.g. a cross-org DaC PAT). Separate from key_vault_name above - link an Azure Pipelines variable group to THIS vault, not the engine's."
 }

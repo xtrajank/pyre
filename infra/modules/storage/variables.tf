@@ -7,7 +7,7 @@ variable "processor_principal_id" { type = string }
 variable "publisher_principal_id" {
   type    = string
   default = ""
-} # CI OIDC SP that runs `pyre publish`
+} # Azure Pipelines Workload Identity Federation service connection that runs `pyre publish`
 variable "tags" {
   type    = map(string)
   default = {}

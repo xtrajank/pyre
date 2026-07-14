@@ -85,11 +85,11 @@ Every Azure resource, what it's for, and its name (with `pyre` as the `name_pref
 | **Ingestion bus** | Event Hubs namespace + `logs-in` hub | `pyre-ehns` | The high-throughput pipe Cribl sends logs into. Delivers logs to the engine in **batches** (the key cost lever). Sized from `config/sources.yaml`. |
 | **Compute (the engine)** | Function App (Flex Consumption) | `pyre-proc` | Runs the detection code. Triggered by Event Hub batches. Scales 0→1000 instances with load. Holds all detections in one app (not one app per detection). |
 | **State store** | Azure Cache for Redis | `pyre-redis` | Remembers dedup counts, thresholds, `unique()` counts, and the storm limiter between logs. Azure Functions are stateless, so this external memory is essential. |
-| **Secrets** | Key Vault | `pyre-kv` | Holds real secrets (Torq token, Cribl creds). The engine reads them by reference; nothing sensitive is in a file. |
+| **Secrets** | **Two** Key Vaults | `pyre-kv`, `pyre-ci-kv` | `pyre-kv` holds engine runtime secrets (Torq token, Cribl creds) - readable only by the processor MI. `pyre-ci-kv` holds CI-only secrets - readable only by the publisher service connection. Split so a compromise of one identity can't reach the other vault's secrets. |
 | **Storage** | Storage account (3 containers) | `pyrestor` | `bundle` = the engine's own deploy package; `detections` = published detection bundles; `checkpoints` = Event Hub read positions. |
 | **Identity** | User-assigned Managed Identity | `pyre-mi` | The one identity the engine uses to authenticate to Event Hub, Redis, Blob, and Key Vault — no passwords anywhere. |
 | **Network** | VNet + 2 subnets + private DNS | `pyre-vnet` | The private network. The engine joins it; every service is reachable only inside it. |
-| **Private endpoints** | 4 of them | `pyre-*-pe` | Make Event Hub, Redis, Blob, Key Vault reachable only privately (never the internet). |
+| **Private endpoints** | 5 of them | `pyre-*-pe` | Make Event Hub, Redis, Blob, and both Key Vaults reachable only privately (never the internet). |
 | **Monitoring** | Log Analytics + App Insights | `pyre-law`, `pyre-ai` | Where the engine's logs, metrics, and traces land so you can see it working and debug it. |
 
 The engine code (in [engine/](../engine/README.md)) is small and modular: `function_app.py` (the thin trigger) → `processor.py` (the loop) → `registry.py`/`dac.py` (load detections) → `dedup.py` (Redis state) → `signals.py`/`dispatch.py` (outputs). See [engine/README.md](../engine/README.md) for the file-by-file breakdown.
@@ -173,6 +173,7 @@ Copy `infra/envs/dev.tfvars.example` / `prod.tfvars.example` to `<instance>.tfva
 | `cribl_sender_principal_id` | Object ID of Cribl's identity, so it may send to Event Hubs. | for real ingest |
 | `publisher_principal_id` | Object ID of the CI service principal that runs `pyre publish`. | for CI publishing |
 | `signals_sink_url` | Cribl HTTP source URL for signal/alert write-back. | for lake write-back |
+| `torq_dev_url` / `torq_prod_url` | Torq webhook URLs (not secrets - the tokens are, in Key Vault). | for Torq dispatch |
 | `refresh_interval_seconds` | Detection hot-reload interval. | no (45) |
 | `storm_limit` | Alerts/detection/hour before suppression. | no (1000) |
 | `throughput_units_floor` / `max_throughput_units` | (prod) Event Hub scaling floor/ceiling. | no |
@@ -194,7 +195,7 @@ Install once:
 Access you need:
 - **Owner** or **Contributor + User Access Administrator** on the target subscription (Terraform creates role assignments).
 - A resource group to deploy into (e.g. `rg-pyre-dev`, `rg-pyre-prod`).
-- For real ingest: the **object ID** of Cribl's Azure identity. For CI publishing: a **service principal with OIDC** federated to your Git host.
+- For real ingest: the **object ID** of Cribl's Azure identity. For CI publishing: an **Azure Pipelines service connection using Workload Identity Federation** (Project Settings -> Service connections -> New -> Azure Resource Manager -> Workload identity federation) - no client secret stored anywhere.
 
 ---
 
@@ -242,7 +243,7 @@ cp infra/envs/<inst>.tfvars.example infra/envs/<inst>.tfvars
 terraform -chdir=infra init  -backend-config="key=<inst>.tfstate"
 terraform -chdir=infra plan  -var-file=envs/<inst>.tfvars
 ```
-The plan lists ~25 resources: the VNet + subnets + DNS, the Managed Identity, Storage (3 containers), Key Vault, Redis (+ its access policy for the identity), Event Hubs (+ receive/send role assignments), the Flex Function App, Log Analytics + App Insights, and 4 private endpoints. Confirm every service shows `public_network_access_enabled = false`.
+The plan lists ~27 resources: the VNet + subnets + DNS, the Managed Identity, Storage (3 containers), two Key Vaults (engine + CI, see § 3), Redis (+ its access policy for the identity), Event Hubs (+ receive/send role assignments), the Flex Function App, Log Analytics + App Insights, and 5 private endpoints. Confirm every service shows `public_network_access_enabled = false`.
 
 ### 9.4 Apply
 ```bash
@@ -254,7 +255,7 @@ Note the outputs (`terraform -chdir=infra output`) — function app name, Event 
 
 ### 9.5 Grant the two external identities
 - **Cribl (to send logs):** set `cribl_sender_principal_id` in tfvars and re-apply (grants Cribl's identity *Event Hubs Data Sender*).
-- **CI publisher (to publish detections):** set `publisher_principal_id` and re-apply (grants it write on the `detections` container).
+- **CI publisher (to publish detections):** set `publisher_principal_id` and re-apply (grants it write on the `detections` container, and Key Vault Secrets User on the *separate* `pyre-ci-kv` vault only — never the engine's `pyre-kv`).
 
 ---
 
@@ -275,7 +276,7 @@ python cli/pyre validate
 python cli/pyre build
 python cli/pyre publish     # upload bundle to Blob + flip the pointer
 ```
-The running engine hot-reloads within `refresh_interval_seconds`. **In production this is automated:** a push to the detections repo fires `.github/workflows/publish-detections.yml`, which runs exactly these steps. Wire that once and detection changes ship by `git push` — no manual publish. See [cli/README.md](../cli/README.md).
+The running engine hot-reloads within `refresh_interval_seconds`. **In production this is automated:** a push to the DaC repo (an Azure Repos Git repo) natively triggers `.azure-pipelines/publish-detections.yml`, which runs exactly these steps. Wire that once (see the one-time setup checklist at the top of that file) and detection changes ship by `git push` — no manual publish. See [cli/README.md](../cli/README.md).
 
 ---
 
@@ -284,7 +285,7 @@ The running engine hot-reloads within `refresh_interval_seconds`. **In productio
 
 **Cribl → Event Hubs (logs in).** In Cribl, add an Event Hubs (Kafka-compatible) destination pointing at `<name_prefix>-ehns.servicebus.windows.net`, hub `logs-in`, authenticating with the Cribl identity you granted in §9.5. Cribl must stamp `p_log_type`, `p_event_time`, and indicator fields during normalization (this is the workstream pyre delegates to Cribl — see `PANTHER_CONVERSION.md` Part 11). Confirm partition/routing per `config/sources.yaml`.
 
-**pyre → Torq (cases out).** In `config/destinations.yaml`, enable `torq_prod`, set its `url_env`/`token_env`; store the Torq token in Key Vault (`az keyvault secret set --vault-name <name_prefix>-kv --name torq-prod-token --value <token>`); point the env's default route at `torq_prod`. Republish is not needed for engine code, but the engine reads destinations at startup, so restart the Function App or redeploy the engine to pick up a new destination.
+**pyre → Torq (cases out).** In `config/destinations.yaml`, enable `torq_prod`. Set `torq_prod_url` in `infra/envs/<inst>.tfvars` (not a secret - it's a plain Terraform variable, wired straight into the `TORQ_PROD_URL` app setting) and re-apply; store the Torq token in the **engine's** Key Vault, not the CI one (`az keyvault secret set --vault-name <name_prefix>-kv --name torq-prod-token --value <token>`); point the env's default route at `torq_prod`. Republish is not needed for engine code, but the engine reads destinations at startup, so restart the Function App or redeploy the engine to pick up a new destination.
 
 **Signals/alerts back to the lake.** Set `signals_sink_url` (a Cribl HTTP source) so every signal and alert is searchable alongside raw logs — this is what makes future AI triage and investigation useful.
 
@@ -454,7 +455,7 @@ To confirm: portal → the resource group should be empty afterward. (Deleting t
 
 - **No public exposure.** Every service has `public_network_access_enabled = false` and is reached only over a private endpoint inside the VNet. The Function App has no public inbound; it pulls from Event Hubs.
 - **No secrets in code or config.** All service-to-service auth uses a **Managed Identity** (Entra), never keys — Event Hubs and Storage have local/shared-key auth disabled. Real secrets (Torq token) live in **Key Vault** and are read by reference.
-- **Least privilege.** The engine identity holds only the specific data roles it needs (Event Hubs Receiver, Redis Data Contributor, Blob Data Contributor, Key Vault Secrets User). The CI publisher is scoped to just the `detections` container.
+- **Least privilege.** The engine identity holds only the specific data roles it needs (Event Hubs Receiver, Redis Data Contributor, Blob Data Contributor, Key Vault Secrets User on the *engine* vault only). The CI publisher is scoped to just the `detections` container and Key Vault Secrets User on a *separate* CI-only vault — neither identity can read the other's secrets.
 - **Auditability.** Infrastructure is Terraform (version-controlled, reviewable). Detections are Git with review + tests. Deploys go through CI. Everything the engine does is logged to Log Analytics.
 - **Data handling.** Signals/alerts are written back to the Cribl lake with per-dataset retention you control.
 

@@ -24,7 +24,7 @@ resource "azurerm_eventhub" "hub" {
   name              = each.key
   namespace_id      = azurerm_eventhub_namespace.ns.id
   partition_count   = each.value.partitions
-  message_retention = each.value.retention_hours >= 24 ? 1 : 1
+  message_retention = max(1, ceil(each.value.retention_hours / 24)) # config is in hours; this attribute is in days
 }
 
 resource "azurerm_private_endpoint" "pe" {
