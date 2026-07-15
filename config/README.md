@@ -9,7 +9,7 @@ New to the terms (DaC, bundle, LogType, destination)? See the [glossary](../docs
 | File | What it controls | Who reads it |
 |---|---|---|
 | `detections.yaml` | **Where the detections live** — the external DaC repo (URL, branch, folder), the Git token variable, and how the bundle is fetched + hot-reloaded. This repo holds *only this pointer*; no detection code. | the `pyre` CLI (`pull`/`publish`) and the engine (which bundle to load) |
-| `sources.yaml` | The log **sources**: each one's LogTypes and how big an Event Hub it needs (partitions = parallelism). Add a source = add an entry. | Terraform (sizes Event Hubs) and the engine (reads `p_log_type` per log) |
+| `sources.yaml` | The log **sources**: each one's LogTypes and how big an Event Hub it needs (partitions = parallelism). Add a source = add an entry. | Terraform (sizes Event Hubs) and the engine (reads the log-type field per log — name set by Terraform's `log_type_field`) |
 | `destinations.yaml` | Where alerts **go**: `mock` (test sink), `webhook`, `torq`. Add an *instance* here; add a new *kind* only by editing `engine/pyre_engine/dispatch.py`. Secrets come from Key Vault via `*_env` references, never inline. | the engine (dispatch) |
 | `envs/dev.yaml`, `envs/prod.yaml` | Per-environment overrides (cost profile, default alert routes). | tooling |
 
@@ -29,7 +29,7 @@ To point pyre at your team's detections, edit `dac.repo`/`dac.ref`/`dac.path` he
 
 1. Add an entry to `sources.yaml` (its LogTypes, a hub, a partition count).
 2. `terraform apply` — the Event Hub is sized for it. No engine change.
-3. Make sure Cribl stamps `p_log_type` for that source and sends it to the hub.
+3. Make sure your normalizer stamps the configured log-type field (Terraform's `log_type_field`, default `dataset`) for that source and sends it to the hub.
 
 ## Example: send alerts to real Torq instead of the mock
 

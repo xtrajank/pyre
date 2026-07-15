@@ -28,13 +28,6 @@ from .models import Signal, Alert
 
 log = logging.getLogger("pyre.processor")
 
-# Cribl doesn't use one universal metadata-field prefix the way Panther's `p_`
-# convention did, so these routing/time fields are captured explicitly on
-# every signal; anything still prefixed `p_` (e.g. p_enrichment) is swept up
-# alongside them below.
-_LOG_METADATA_KEYS = ("dataset", "_time")
-
-
 def _load_enabled_ids() -> set[str] | None:
     # In prod, read the enabled-set from Azure App Configuration (short cache).
     # Here: optional env override; None means "trust the YAML Enabled flag".
@@ -72,6 +65,12 @@ class Processor:
     def process_batch(self, raw_events: list[str], event_ids: list[str] | None = None) -> None:
         registry = self.loader.get()          # hot-reloads on a DaC push / enable flip
         hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+        # No universal metadata-field prefix (Cribl doesn't use Panther's `p_`
+        # convention, and this may not even be Cribl - see cfg.log_type_field/
+        # event_time_field), so these two configured routing/time fields are
+        # captured explicitly on every signal; anything still prefixed `p_`
+        # (e.g. p_enrichment) is swept up alongside them below.
+        log_metadata_keys = (self.cfg.log_type_field, self.cfg.event_time_field)
 
         # Phase 0: idempotency. Event Hubs is at-least-once, so a checkpoint retry
         # can redeliver a batch we already processed. One extra pipelined round-trip
@@ -100,7 +99,7 @@ class Processor:
                 event = Event(json.loads(raw))
             except json.JSONDecodeError:
                 continue
-            log_type = event.get("dataset")
+            log_type = event.get(self.cfg.log_type_field)
             if not log_type:
                 continue
             event = self.enricher.enrich(event)
@@ -118,9 +117,9 @@ class Processor:
                 # ALWAYS a signal on match
                 self.signals.add_signal(Signal(
                     detection_id=det.id, log_type=log_type, dedup_string=dedup_str,
-                    event_time=event.get("_time", ""), event_ref=event,
+                    event_time=event.get(self.cfg.event_time_field, ""), event_ref=event,
                     p_fields={
-                        **{k: event[k] for k in _LOG_METADATA_KEYS if k in event},
+                        **{k: event[k] for k in log_metadata_keys if k in event},
                         **{k: v for k, v in event.items() if k.startswith("p_")},
                     },
                 ))
@@ -157,7 +156,7 @@ class Processor:
                 alert_id=str(uuid.uuid4()), detection_id=det.id,
                 title=det.title(event), severity=det.severity(event),
                 dedup_string=dedup_str, context=det.alert_context(event),
-                first_event_time=event.get("_time", ""),
+                first_event_time=event.get(self.cfg.event_time_field, ""),
             )
             # atomic claim of the alert marker (first-event-wins)
             if not self.state.register_alert(det.id, dedup_str, alert.alert_id, det.dedup_period_seconds):

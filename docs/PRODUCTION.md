@@ -170,8 +170,10 @@ Copy `infra/envs/dev.tfvars.example` / `prod.tfvars.example` to `<instance>.tfva
 | `resource_group_name` | The resource group to deploy into. | **yes** |
 | `cost_profile` | `test` (cheap) or `scale` (prod). | has default per env |
 | `owner` | Tag value for cost attribution. | no |
-| `cribl_sender_principal_id` | Object ID of Cribl's identity, so it may send to Event Hubs. | for real ingest |
-| `publisher_principal_id` | Object ID of the CI service principal that runs `pyre publish`. | for CI publishing |
+| `log_type_field` | Event field the engine reads to select which detections run (default `dataset`, Cribl's own field name). | no (has default) |
+| `event_time_field` | Event field the engine reads for the signal/alert timestamp (default `_time`, Cribl's own field name). | no (has default) |
+| `log_sender` | `{ mode, principal_id, federated_credentials }` describing whatever sends logs to Event Hubs — `mode = "managed_identity"` if it's an Azure resource with its own identity (set `principal_id`), or `mode = "federated"` if it's outside Azure (set `federated_credentials`; Terraform provisions the OIDC trust). | for real ingest |
+| `publisher` | Same `{ mode, principal_id, federated_credentials }` shape for the CI identity that runs `pyre publish`. | for CI publishing |
 | `signals_sink_url` | Cribl HTTP source URL for signal/alert write-back. | for lake write-back |
 | `torq_dev_url` / `torq_prod_url` | Torq webhook URLs (not secrets - the tokens are, in Key Vault). | for Torq dispatch |
 | `refresh_interval_seconds` | Detection hot-reload interval. | no (45) |
@@ -195,7 +197,9 @@ Install once:
 Access you need:
 - **Owner** or **Contributor + User Access Administrator** on the target subscription (Terraform creates role assignments).
 - A resource group to deploy into (e.g. `rg-pyre-dev`, `rg-pyre-prod`).
-- For real ingest: the **object ID** of Cribl's Azure identity. For CI publishing: an **Azure Pipelines service connection using Workload Identity Federation** (Project Settings -> Service connections -> New -> Azure Resource Manager -> Workload identity federation) - no client secret stored anywhere.
+- For real ingest and for CI publishing, decide **how each external actor authenticates** (see §6.3's `log_sender`/`publisher` variables and §9.5):
+  - If it's an Azure resource (your log shipper deployed on a VM/VMSS/Container App, or a self-hosted CI agent pool running on Azure compute) it already has an identity — you just need its **object ID**.
+  - If it's not an Azure resource (a laptop, GitHub Actions, ADO Microsoft-hosted agents) it authenticates via **Workload Identity Federation** — Terraform provisions the trust itself once you give it the issuer/subject (for an ADO service connection: Project Settings -> Service connections -> New -> Azure Resource Manager -> Workload identity federation -> manual, which then shows you the issuer/subject to feed back into Terraform). No client secret is stored anywhere either way.
 
 ---
 
@@ -254,8 +258,11 @@ Note the outputs (`terraform -chdir=infra output`) — function app name, Event 
 > Shortcut: the Makefile wraps all of this — `make init ENV=<inst>` then `make apply ENV=<inst>`.
 
 ### 9.5 Grant the two external identities
-- **Cribl (to send logs):** set `cribl_sender_principal_id` in tfvars and re-apply (grants Cribl's identity *Event Hubs Data Sender*).
-- **CI publisher (to publish detections):** set `publisher_principal_id` and re-apply (grants it write on the `detections` container, and Key Vault Secrets User on the *separate* `pyre-ci-kv` vault only — never the engine's `pyre-kv`).
+pyre trusts exactly two actors outside its own processor identity, each configured the same way — a `mode` describing how it authenticates, not a fixed product (see `infra/envs/dev.tfvars.example` for four worked examples):
+- **`log_sender` (to send logs):** whatever ships logs into Event Hubs (Cribl, Fluent Bit, a custom forwarder, ...). `mode = "managed_identity"` + `principal_id` if it runs as an Azure resource with its own identity; `mode = "federated"` + `federated_credentials` if it doesn't. Set it in tfvars and re-apply (grants *Event Hubs Data Sender*).
+- **`publisher` (to publish detections):** the CI identity that runs `pyre publish`. `mode = "managed_identity"` if your CI agent pool itself runs on Azure compute (no federation setup needed at all — see `.azure-pipelines/publish-detections.yml`'s `identityMode` parameter); `mode = "federated"` if it doesn't (GitHub Actions, ADO Microsoft-hosted agents). Set it in tfvars and re-apply (grants write on the `detections` container, and Key Vault Secrets User on the *separate* `pyre-ci-kv` vault only — never the engine's `pyre-kv`).
+
+When `mode = "federated"`, Terraform (`module.external_identity`) creates the identity and its OIDC trust for you — nothing to provision by hand beyond telling your CI platform which issuer/subject to present (its own OIDC token) and which `client_id`/`tenant_id` to log in with (see the `log_sender_client_id`/`publisher_client_id` outputs).
 
 ---
 
@@ -283,7 +290,7 @@ The running engine hot-reloads within `refresh_interval_seconds`. **In productio
 <a name="11-connect-cribl-torq"></a>
 ## 11. Spin up PART 4 — connect Cribl (in) and Torq (out)
 
-**Cribl → Event Hubs (logs in).** In Cribl, add an Event Hubs (Kafka-compatible) destination pointing at `<name_prefix>-ehns.servicebus.windows.net`, hub `logs-in`, authenticating with the Cribl identity you granted in §9.5. Cribl must stamp `p_log_type`, `p_event_time`, and indicator fields during normalization (this is the workstream pyre delegates to Cribl — see `PANTHER_CONVERSION.md` Part 11). Confirm partition/routing per `config/sources.yaml`.
+**Cribl → Event Hubs (logs in).** In Cribl, add an Event Hubs (Kafka-compatible) destination pointing at `<name_prefix>-ehns.servicebus.windows.net`, hub `logs-in`, authenticating with the `log_sender` identity you granted in §9.5. Cribl must stamp a log-type field and an event-time field during normalization, plus indicator fields (this is the workstream pyre delegates to Cribl — see `PANTHER_CONVERSION.md` Part 11). By default the engine reads Cribl's own field names — `dataset` for log type, `_time` for event time — via the `log_type_field`/`event_time_field` Terraform variables (§6.3); if your normalizer stamps different names (e.g. Panther-style `p_log_type`/`p_event_time`), set those variables to match instead of relabeling your feed. Confirm partition/routing per `config/sources.yaml`.
 
 **pyre → Torq (cases out).** In `config/destinations.yaml`, enable `torq_prod`. Set `torq_prod_url` in `infra/envs/<inst>.tfvars` (not a secret - it's a plain Terraform variable, wired straight into the `TORQ_PROD_URL` app setting) and re-apply; store the Torq token in the **engine's** Key Vault, not the CI one (`az keyvault secret set --vault-name <name_prefix>-kv --name torq-prod-token --value <token>`); point the env's default route at `torq_prod`. Republish is not needed for engine code, but the engine reads destinations at startup, so restart the Function App or redeploy the engine to pick up a new destination.
 
@@ -454,8 +461,8 @@ To confirm: portal → the resource group should be empty afterward. (Deleting t
 ## 18. Security posture (for review / compliance)
 
 - **No public exposure.** Every service has `public_network_access_enabled = false` and is reached only over a private endpoint inside the VNet. The Function App has no public inbound; it pulls from Event Hubs.
-- **No secrets in code or config.** All service-to-service auth uses a **Managed Identity** (Entra), never keys — Event Hubs and Storage have local/shared-key auth disabled. Real secrets (Torq token) live in **Key Vault** and are read by reference.
-- **Least privilege.** The engine identity holds only the specific data roles it needs (Event Hubs Receiver, Redis Data Contributor, Blob Data Contributor, Key Vault Secrets User on the *engine* vault only). The CI publisher is scoped to just the `detections` container and Key Vault Secrets User on a *separate* CI-only vault — neither identity can read the other's secrets.
+- **No secrets in code or config.** All service-to-service auth uses either a **Managed Identity** or a **Workload Identity Federation** OIDC trust (Entra), never keys or client secrets — Event Hubs and Storage have local/shared-key auth disabled. Real secrets (Torq token, log-sender creds) live in **Key Vault** and are read by reference.
+- **Least privilege.** The engine identity holds only the specific data roles it needs (Event Hubs Receiver, Redis Data Contributor, Blob Data Contributor, Key Vault Secrets User on the *engine* vault only). The CI publisher (whichever auth mode it uses) is scoped to just the `detections` container and Key Vault Secrets User on a *separate* CI-only vault — neither identity can read the other's secrets.
 - **Auditability.** Infrastructure is Terraform (version-controlled, reviewable). Detections are Git with review + tests. Deploys go through CI. Everything the engine does is logged to Log Analytics.
 - **Data handling.** Signals/alerts are written back to the Cribl lake with per-dataset retention you control.
 

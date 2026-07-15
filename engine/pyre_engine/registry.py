@@ -3,8 +3,9 @@
 Loads the detection bundle (your DaC: paired .py + .yml, same structure as
 panther-analysis) and builds an index from LOG TYPE -> [detections]. The
 processor uses this so an incoming event only runs the detections registered
-for its p_log_type. A Palo event never executes Cloudflare rules; this is what
-keeps 400+ detections cheap at scale.
+for its log type (read from whichever field `cfg.log_type_field` names - see
+processor.py and config.py). A Palo event never executes Cloudflare rules;
+this is what keeps 400+ detections cheap at scale.
 
 A "detection" here wraps the user's module and exposes the Panther-compatible
 function contract: rule(), and the optional title/dedup/severity/alert_context/

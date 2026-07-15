@@ -47,7 +47,7 @@ Written for someone brand new to security operations, Azure, and Terraform. Skim
 
 **Normalization** — reshaping messy vendor-specific logs into a consistent format with standard fields, so a detection can rely on the fields being there.
 
-**p_ fields** — the standard fields normalization adds, borrowed from Panther's naming: `p_log_type` (what kind of log — `Palo.Traffic`, `Okta.SystemLog`), `p_event_time` (when it happened), etc. pyre routes and processes based on these.
+**p_ fields** — Panther's naming convention for the standard fields normalization adds: `p_log_type` (what kind of log — `Palo.Traffic`, `Okta.SystemLog`), `p_event_time` (when it happened), etc. Cribl doesn't use this prefix convention natively (its own fields are `dataset` and `_time`); pyre doesn't assume either — which field names it reads for log type and event time are a Terraform setting (`log_type_field`/`event_time_field`, defaulting to Cribl's `dataset`/`_time`), and any other `p_`-prefixed field (e.g. `p_enrichment`) still passes through untouched.
 
 **Log type / LogType** — the label for a kind of log (e.g. `Cloudflare.HttpRequest`). Every detection declares which log types it applies to; pyre uses that to run only the relevant detections per log — a Palo log never runs Cloudflare rules.
 

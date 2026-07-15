@@ -20,10 +20,54 @@ functions_subnet_prefix = "10.0.2.0/24"
 # (one invocation per log) on a low-volume, latency-critical instance.
 # max_event_batch_size = 256
 
-# Identities to grant (optional until you wire Cribl / CI):
-# cribl_sender_principal_id = "<object-id-of-cribl-identity>"
-# publisher_principal_id    = "<object-id-of-the-ADO-workload-identity-federation-service-connection>"
-# signals_sink_url          = "https://<cribl-http-source>"
+# Event/log field names your feed actually uses (defaults match Cribl's own
+# field names, not Panther's p_ prefix - override if yours differ):
+# log_type_field   = "dataset"     # e.g. "p_log_type" for a Panther-style feed
+# event_time_field = "_time"       # e.g. "p_event_time" for a Panther-style feed
+
+# External identities to trust - each is EITHER an Azure resource (use its own
+# Managed Identity) OR software outside Azure (use Workload Identity
+# Federation; Terraform provisions the trust, no client secret ever stored).
+# Leave unset to skip granting access until you know which shape applies.
+
+# Example A: your log shipper runs as an Azure resource with its own identity
+# (e.g. Cribl deployed on an Azure VM/VMSS/Container App):
+# log_sender = {
+#   mode         = "managed_identity"
+#   principal_id = "<object-id-of-that-identity>"
+# }
+# Example B: your CI runs outside Azure (GitHub Actions - typical for local/
+# test pipelines; this is the temporary, non-production path):
+# publisher = {
+#   mode = "federated"
+#   federated_credentials = [{
+#     name    = "github-main"
+#     issuer  = "https://token.actions.githubusercontent.com"
+#     subject = "repo:<org>/<repo>:ref:refs/heads/main"
+#   }]
+# }
+# Example C: your CI runs on a self-hosted ADO agent that IS an Azure resource
+# (a VM/VMSS with its own Managed Identity) - the production path, no
+# federation setup needed at all:
+# publisher = {
+#   mode         = "managed_identity"
+#   principal_id = "<object-id-of-the-agent-VM's-managed-identity>"
+# }
+# Example D: your CI runs on ADO Microsoft-hosted agents (no Azure identity to
+# attach) - also production, but needs a federated trust instead. Create an
+# ADO "workload identity federation" service connection first (Project
+# Settings -> Service connections -> New -> Azure Resource Manager ->
+# Workload identity federation -> manual), which shows you the issuer/subject
+# to put here:
+# publisher = {
+#   mode = "federated"
+#   federated_credentials = [{
+#     name    = "ado-pyre-publisher"
+#     issuer  = "<issuer-ADO-shows-you>"
+#     subject = "<subject-ADO-shows-you>"
+#   }]
+# }
+# signals_sink_url = "https://<cribl-http-source>"
 
 # Torq destinations (config/destinations.yaml). URLs only - the tokens
 # (torq-dev-token / torq-prod-token) go in Key Vault, not here:

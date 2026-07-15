@@ -24,10 +24,19 @@ max_throughput_units   = 20
 # it's a ceiling, not a wait, so it doesn't delay alerts). 1 = single-event.
 # max_event_batch_size = 256
 
-# Prod really wants these set:
-# cribl_sender_principal_id = "<object-id-of-cribl-identity>"
-# publisher_principal_id    = "<object-id-of-the-ADO-workload-identity-federation-service-connection>"
-# signals_sink_url          = "https://<cribl-http-source>"
+# Event/log field names your feed actually uses (defaults match Cribl's own
+# field names, not Panther's p_ prefix - override if yours differ):
+# log_type_field   = "dataset"
+# event_time_field = "_time"
+
+# Prod really wants these set - each is EITHER an Azure resource (its own
+# Managed Identity) OR software outside Azure (Workload Identity Federation).
+# See envs/dev.tfvars.example for the four worked examples (A-D); prod
+# typically lands on C (self-hosted ADO agent on Azure compute - no
+# federation setup at all) or D (ADO Microsoft-hosted agents):
+# log_sender = { mode = "managed_identity", principal_id = "<object-id-of-the-log-sender's-identity>" }
+# publisher  = { mode = "managed_identity", principal_id = "<object-id-of-the-ADO-agent's-managed-identity>" }
+# signals_sink_url = "https://<cribl-http-source>"
 
 # Torq destinations (config/destinations.yaml). URLs only - the tokens
 # (torq-dev-token / torq-prod-token) go in Key Vault, not here:

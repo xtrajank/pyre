@@ -25,6 +25,14 @@ variable "storm_limit" {
   type    = number
   default = 1000
 }
+variable "log_type_field" {
+  type    = string
+  default = "dataset" # event field the engine reads to select which detections run
+}
+variable "event_time_field" {
+  type    = string
+  default = "_time" # event field the engine reads for the signal/alert timestamp
+}
 variable "app_insights_conn" {
   type    = string
   default = ""

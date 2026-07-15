@@ -36,7 +36,7 @@ Same composition, same private posture — only the values differ:
 | state key | `dev.tfstate` | `prod.tfstate` (same store, separate blobs) |
 | Network posture | fully private | fully private (identical) |
 
-Both use **Managed Identity + Key Vault** (never passwords in files) and are fully private (no public access; logs arrive via Cribl). To make a third instance, copy a `.tfvars`, change `name_prefix`/`env`/CIDR, and deploy with a new state key. See [docs/PRODUCTION.md § 5](../docs/PRODUCTION.md#5-environments) for the full comparison (including the `local` laptop environment) and cost.
+Both use **Managed Identity + Key Vault** (never passwords in files) and are fully private (no public access; logs arrive via whatever `log_sender` you've configured — Cribl in our deployment). To make a third instance, copy a `.tfvars`, change `name_prefix`/`env`/CIDR, and deploy with a new state key. See [docs/PRODUCTION.md § 5](../docs/PRODUCTION.md#5-environments) for the full comparison (including the `local` laptop environment) and cost.
 
 ## What each module creates (and the one thing to know)
 
@@ -44,11 +44,12 @@ Both use **Managed Identity + Key Vault** (never passwords in files) and are ful
 |---|---|---|
 | `network` | VNet, two subnets (Functions-delegated + private-endpoints), private DNS zones | The private network everything else attaches to. |
 | `identity` | One user-assigned Managed Identity | The single identity the engine uses to reach Event Hub, Redis, Blob, and Key Vault. |
-| `storage` | Storage account with `checkpoints`, `bundle`, `detections` containers | `detections` holds published detection bundles; `bundle` is the Function App's own deploy package. A CI identity may write `detections` (`publisher_principal_id`). |
-| `eventhub` | Event Hubs namespace + the `logs-in` hub, sized from `config/sources.yaml` | Grants the engine's MI *receive* and Cribl's identity *send* — no access keys. |
+| `external_identity` | Nothing (mode = `managed_identity`, a passthrough) or a user-assigned Managed Identity + federated credential (mode = `federated`) | Generalizes how the two external actors (`log_sender`, `publisher`) authenticate — an Azure resource's own identity, or a Workload Identity Federation trust for software outside Azure. Instantiated twice from root `main.tf`. |
+| `storage` | Storage account with `checkpoints`, `bundle`, `detections` containers | `detections` holds published detection bundles; `bundle` is the Function App's own deploy package. The `publisher` identity may write `detections`. |
+| `eventhub` | Event Hubs namespace + the `logs-in` hub, sized from `config/sources.yaml` | Grants the engine's MI *receive* and the `log_sender` identity *send* — no access keys. |
 | `redis` | Azure Cache for Redis + a **data-plane access policy** for the engine's MI | That access policy is what lets the engine actually use Redis (Entra auth, no keys). Biggest single cost. |
-| `keyvault` | **Two** Key Vaults (the module is instantiated twice) | `module.keyvault` holds engine runtime secrets (Torq tokens, Cribl creds) - readable only by the processor MI. `module.ci_keyvault` holds CI-only secrets - readable only by the publisher service connection. Two vaults, not one with two roles, so a compromised identity on one side can't read the other's secrets. |
-| `function_app` | The Flex Consumption Function App (the processor) + all its settings | Reads Event Hub/Redis/Key Vault/Blob **by identity**. |
+| `keyvault` | **Two** Key Vaults (the module is instantiated twice) | `module.keyvault` holds engine runtime secrets (Torq tokens, log-sender creds) - readable only by the processor MI. `module.ci_keyvault` holds CI-only secrets - readable only by the `publisher` identity. Two vaults, not one with two roles, so a compromised identity on one side can't read the other's secrets. |
+| `function_app` | The Flex Consumption Function App (the processor) + all its settings | Reads Event Hub/Redis/Key Vault/Blob **by identity**. Also carries `log_type_field`/`event_time_field`, the per-feed field-name mapping. |
 | `monitoring` | Log Analytics workspace + Application Insights | Where the engine's logs and metrics land. |
 
 ## How to read it

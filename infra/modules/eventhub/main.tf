@@ -45,7 +45,7 @@ resource "azurerm_private_endpoint" "pe" {
   tags = var.tags
 }
 
-# RBAC: processor identity receives; Cribl sender identity sends. No keys.
+# RBAC: processor identity receives; the log sender's identity sends. No keys.
 resource "azurerm_role_assignment" "receiver" {
   scope                = azurerm_eventhub_namespace.ns.id
   role_definition_name = "Azure Event Hubs Data Receiver"

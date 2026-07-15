@@ -1,5 +1,6 @@
 # Declarative log sources. IaC reads this to size Event Hubs; the engine reads
-# p_log_type off each event at runtime. Add a source = add an entry here.
+# the configured log-type field (Terraform var log_type_field, default
+# "dataset") off each event at runtime. Add a source = add an entry here.
 # Give high-volume sources their own hub + more partitions to isolate scaling.
 
 sources:

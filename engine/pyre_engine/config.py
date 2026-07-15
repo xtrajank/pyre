@@ -69,6 +69,12 @@ class RuntimeConfig:
     destinations_path: str = field(default_factory=lambda: os.environ.get("DESTINATIONS_PATH", "config/destinations.yaml"))
     signals_sink_url: str = field(default_factory=lambda: os.environ.get("SIGNALS_SINK_URL", ""))  # Cribl HTTP source
     storm_limit_per_hour: int = field(default_factory=lambda: int(os.environ.get("STORM_LIMIT", "1000")))
+    # Which event field selects detections and which carries the event's own
+    # timestamp. Defaults match Cribl's own field names (not Panther's `p_`
+    # prefix convention); set via Terraform's log_type_field/event_time_field
+    # to match whatever your normalizer actually stamps.
+    log_type_field: str = field(default_factory=lambda: os.environ.get("LOG_TYPE_FIELD", "dataset"))
+    event_time_field: str = field(default_factory=lambda: os.environ.get("EVENT_TIME_FIELD", "_time"))
 
 
 def load_runtime_config() -> RuntimeConfig:

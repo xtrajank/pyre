@@ -3,6 +3,16 @@ name: publish-detections
 # Warm workers hot-reload it within refresh_interval_seconds (default 45s) - no
 # redeploy. This is the "push -> live" pipeline in docs/architecture.md.
 #
+# GitHub Actions runners are never Azure resources, so this workflow always
+# authenticates via Workload Identity Federation (the azure/login step below,
+# OIDC only - no client secret). Treat this file as the LOCAL/TESTING path:
+# useful for a personal fork or a quick validation loop against a real Azure
+# instance. The production pipeline is .azure-pipelines/publish-detections.yml,
+# which - because it runs in Azure DevOps - can use either Workload Identity
+# Federation OR a plain Managed Identity if its agents run on Azure compute
+# you control (see that file's identityMode parameter and infra/variables.tf's
+# `publisher` variable for the underlying Terraform-level choice).
+#
 # Triggers:
 #   - workflow_dispatch     : publish on demand (pick the env).
 #   - repository_dispatch   : the DaC repo fires this on merge (see the snippet at

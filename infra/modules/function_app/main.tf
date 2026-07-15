@@ -52,6 +52,11 @@ resource "azurerm_function_app_flex_consumption" "app" {
     BUNDLE_BLOB_ACCOUNT_URL  = var.bundle_blob_account_url
     REFRESH_INTERVAL_SECONDS = tostring(var.refresh_interval_seconds)
     STORM_LIMIT              = tostring(var.storm_limit)
+    # Which event field routes to detections and which carries the event's own
+    # timestamp - configurable per feed (default matches Cribl's own field
+    # names, not Panther's p_ prefix convention). See var.log_type_field.
+    LOG_TYPE_FIELD           = var.log_type_field
+    EVENT_TIME_FIELD         = var.event_time_field
     MOCK_DEST_URL            = var.mock_dest_url # test-lab alert sink; empty in prod
     # Batch <-> single-event knob. Overrides host.json's maxEventBatchSize at
     # runtime (the AzureFunctionsJobHost__ prefix maps to host.json). 1 = process

@@ -47,6 +47,34 @@ module "monitoring" {
   tags                = local.tags
 }
 
+# The two external actors pyre trusts, generalized over how each proves its
+# identity to Azure (an Azure resource's own Managed Identity, or an OIDC
+# Workload Identity Federation trust for software outside Azure) - see
+# infra/modules/external_identity and the `log_sender`/`publisher` variables.
+module "log_sender_identity" {
+  source                = "./modules/external_identity"
+  name_prefix            = var.name_prefix
+  location               = var.location
+  resource_group_name    = var.resource_group_name
+  name                   = "sender"
+  mode                   = var.log_sender.mode
+  principal_id           = var.log_sender.principal_id
+  federated_credentials  = var.log_sender.federated_credentials
+  tags                   = local.tags
+}
+
+module "publisher_identity" {
+  source                = "./modules/external_identity"
+  name_prefix            = var.name_prefix
+  location               = var.location
+  resource_group_name    = var.resource_group_name
+  name                   = "publisher"
+  mode                   = var.publisher.mode
+  principal_id           = var.publisher.principal_id
+  federated_credentials  = var.publisher.federated_credentials
+  tags                   = local.tags
+}
+
 module "storage" {
   source                 = "./modules/storage"
   name_prefix            = var.name_prefix
@@ -55,7 +83,7 @@ module "storage" {
   pe_subnet_id           = module.network.pe_subnet_id
   dns_zone_id            = module.network.dns_zone_ids["blob"]
   processor_principal_id = module.identity.principal_id
-  publisher_principal_id = var.publisher_principal_id
+  publisher_principal_id = module.publisher_identity.principal_id
   tags                   = local.tags
 }
 
@@ -66,7 +94,7 @@ module "keyvault" {
   resource_group_name  = var.resource_group_name
   pe_subnet_id         = module.network.pe_subnet_id
   dns_zone_id          = module.network.dns_zone_ids["keyvault"]
-  reader_principal_ids = [module.identity.principal_id] # engine runtime secrets: Torq tokens, Cribl creds
+  reader_principal_ids = [module.identity.principal_id] # engine runtime secrets: Torq tokens, log-sender creds
   tags                 = local.tags
 }
 
@@ -83,7 +111,7 @@ module "ci_keyvault" {
   pe_subnet_id         = module.network.pe_subnet_id
   dns_zone_id          = module.network.dns_zone_ids["keyvault"]
   name_suffix          = "ci-kv"
-  reader_principal_ids = var.publisher_principal_id == "" ? [] : [var.publisher_principal_id]
+  reader_principal_ids = module.publisher_identity.principal_id == "" ? [] : [module.publisher_identity.principal_id]
   tags                 = local.tags
 }
 
@@ -111,7 +139,7 @@ module "eventhub" {
   throughput_units_scale = var.throughput_units_floor
   max_throughput_units   = var.max_throughput_units
   processor_principal_id = module.identity.principal_id
-  sender_principal_id    = var.cribl_sender_principal_id
+  sender_principal_id    = module.log_sender_identity.principal_id
   tags                   = local.tags
 }
 
@@ -135,6 +163,8 @@ module "function_app" {
   kv_uri                    = module.keyvault.uri
   app_insights_conn         = module.monitoring.app_insights_conn
   storm_limit               = var.storm_limit
+  log_type_field            = var.log_type_field
+  event_time_field          = var.event_time_field
   signals_sink_url          = var.signals_sink_url
   mock_dest_url             = var.mock_dest_url
   torq_dev_url              = var.torq_dev_url

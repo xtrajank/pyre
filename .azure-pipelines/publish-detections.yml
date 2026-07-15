@@ -28,13 +28,27 @@
 #   4. Create ADO Environments named `pyre-dev` and `pyre-prod` (Pipelines ->
 #      Environments) and add approval checks on `pyre-prod` if a human gate is
 #      wanted before a bundle reaches production.
-#   5. Create an Azure Resource Manager service connection using Workload
-#      Identity Federation (Project Settings -> Service connections -> New ->
-#      Azure Resource Manager -> Workload identity federation). This is ADO's
-#      equivalent of the old GitHub OIDC SP - no client secret stored anywhere.
-#      Grant its principal ID to Terraform's `publisher_principal_id` (infra/
-#      envs/<env>.tfvars) and re-apply - that's what grants Storage Blob Data
-#      Contributor on the `detections` container, scoped least-privilege.
+#   5. Pick how THIS pipeline authenticates to Azure (the `identityMode`
+#      parameter below) - it depends on where its agents run, not on ADO vs.
+#      GitHub:
+#        - identityMode: federated (default) - for Microsoft-hosted agents
+#          (or any agent that isn't itself an Azure resource). Create an
+#          Azure Resource Manager service connection using Workload Identity
+#          Federation (Project Settings -> Service connections -> New ->
+#          Azure Resource Manager -> Workload identity federation) - no
+#          client secret stored anywhere. Set `publisher.mode = "federated"`
+#          with a federated_credentials entry for the issuer/subject ADO
+#          shows you in infra/envs/<env>.tfvars and re-apply; that provisions
+#          the trust and grants Storage Blob Data Contributor on the
+#          `detections` container, scoped least-privilege.
+#        - identityMode: managed_identity - for a self-hosted agent pool that
+#          IS an Azure resource (a VM/VMSS with its own Managed Identity
+#          attached, e.g. an internal ADO agent pool already running in your
+#          subscription). No service connection and no federation setup at
+#          all: `pyre publish`'s DefaultAzureCredential picks up the agent
+#          VM's identity directly. Set `publisher.mode = "managed_identity"`
+#          with that identity's object ID in infra/envs/<env>.tfvars and
+#          re-apply, and point `pool` below at that agent pool.
 #   6. If the DaC repo is in the SAME ADO org/project: Project Settings ->
 #      Repositories -> <DaC repo> -> Security -> grant "<Project> Build Service
 #      (<Org>)" Read access, and tick "Allow scripts to access the OAuth
@@ -59,9 +73,19 @@ parameters:
     type: string
     default: dev
     values: [dev, prod]
+  - name: identityMode
+    displayName: How this pipeline authenticates to Azure to publish
+    type: string
+    default: federated
+    values: [federated, managed_identity]
+    # federated         - Microsoft-hosted agents (this default), needs the
+    #   WIF service connection from one-time setup step 5.
+    # managed_identity  - a self-hosted agent pool that IS an Azure resource
+    #   with its own Managed Identity. No service connection at all - change
+    #   `pool` below to that agent pool if you pick this.
 
 pool:
-  vmImage: ubuntu-latest
+  vmImage: ubuntu-latest   # Microsoft-hosted; for identityMode: managed_identity, point this at your self-hosted Azure agent pool instead, e.g. `name: <your-pool>`.
 
 jobs:
   - deployment: publish
@@ -97,18 +121,29 @@ jobs:
                 SYSTEM_ACCESSTOKEN: $(System.AccessToken)
                 DAC_REF: $(Build.SourceVersion)   # pins the exact DaC commit that triggered this run
 
-            - task: AzureCLI@2
-              displayName: publish bundle -> Blob
-              inputs:
-                azureSubscription: pyre-publisher   # <-- the Workload Identity Federation service connection from setup step 5
-                scriptType: bash
-                scriptLocation: inlineScript
-                # AzureCLI@2 logs in via the service connection before running this
-                # script; pyre publish's DefaultAzureCredential() picks that same
-                # session up (the AzureCliCredential fallback) - no env vars needed.
-                inlineScript: |
+            # identityMode: federated - log in via the WIF service connection first;
+            # pyre publish's DefaultAzureCredential() picks that session up (the
+            # AzureCliCredential fallback) - no env vars needed.
+            - ${{ if eq(parameters.identityMode, 'federated') }}:
+              - task: AzureCLI@2
+                displayName: publish bundle -> Blob (federated)
+                inputs:
+                  azureSubscription: pyre-publisher   # <-- the Workload Identity Federation service connection from setup step 5
+                  scriptType: bash
+                  scriptLocation: inlineScript
+                  inlineScript: |
+                    set -eu
+                    ./cli/pyre publish --account-url "$(BUNDLE_BLOB_ACCOUNT_URL)"
+
+            # identityMode: managed_identity - no login step at all: the agent VM's
+            # own attached identity is picked up directly (DefaultAzureCredential's
+            # ManagedIdentityCredential fallback). Requires `pool` above to be a
+            # self-hosted pool running on that Azure resource - see setup step 5.
+            - ${{ if eq(parameters.identityMode, 'managed_identity') }}:
+              - script: |
                   set -eu
                   ./cli/pyre publish --account-url "$(BUNDLE_BLOB_ACCOUNT_URL)"
+                displayName: publish bundle -> Blob (managed identity)
 
             - script: |
                 echo "publish complete for ${{ parameters.env }}; workers hot-reload within refresh_interval_seconds"

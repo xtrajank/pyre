@@ -27,3 +27,11 @@ output "ci_key_vault_name" {
   value       = module.ci_keyvault.name
   description = "CI-only secrets (e.g. a cross-org DaC PAT). Separate from key_vault_name above - link an Azure Pipelines variable group to THIS vault, not the engine's."
 }
+output "publisher_client_id" {
+  value       = module.publisher_identity.client_id
+  description = "Set only when publisher.mode = \"federated\". Give this to your CI platform's OIDC login step (e.g. azure/login's client-id, or an ADO manual workload-identity-federation service connection) - null when publisher.mode = \"managed_identity\"."
+}
+output "log_sender_client_id" {
+  value       = module.log_sender_identity.client_id
+  description = "Set only when log_sender.mode = \"federated\". Null when log_sender.mode = \"managed_identity\"."
+}
