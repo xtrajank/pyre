@@ -53,26 +53,26 @@ module "monitoring" {
 # infra/modules/external_identity and the `log_sender`/`publisher` variables.
 module "log_sender_identity" {
   source                = "./modules/external_identity"
-  name_prefix            = var.name_prefix
-  location               = var.location
-  resource_group_name    = var.resource_group_name
-  name                   = "sender"
-  mode                   = var.log_sender.mode
-  principal_id           = var.log_sender.principal_id
-  federated_credentials  = var.log_sender.federated_credentials
-  tags                   = local.tags
+  name_prefix           = var.name_prefix
+  location              = var.location
+  resource_group_name   = var.resource_group_name
+  name                  = "sender"
+  mode                  = var.log_sender.mode
+  principal_id          = var.log_sender.principal_id
+  federated_credentials = var.log_sender.federated_credentials
+  tags                  = local.tags
 }
 
 module "publisher_identity" {
   source                = "./modules/external_identity"
-  name_prefix            = var.name_prefix
-  location               = var.location
-  resource_group_name    = var.resource_group_name
-  name                   = "publisher"
-  mode                   = var.publisher.mode
-  principal_id           = var.publisher.principal_id
-  federated_credentials  = var.publisher.federated_credentials
-  tags                   = local.tags
+  name_prefix           = var.name_prefix
+  location              = var.location
+  resource_group_name   = var.resource_group_name
+  name                  = "publisher"
+  mode                  = var.publisher.mode
+  principal_id          = var.publisher.principal_id
+  federated_credentials = var.publisher.federated_credentials
+  tags                  = local.tags
 }
 
 module "storage" {

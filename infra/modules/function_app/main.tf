@@ -55,9 +55,9 @@ resource "azurerm_function_app_flex_consumption" "app" {
     # Which event field routes to detections and which carries the event's own
     # timestamp - configurable per feed (default matches Cribl's own field
     # names, not Panther's p_ prefix convention). See var.log_type_field.
-    LOG_TYPE_FIELD           = var.log_type_field
-    EVENT_TIME_FIELD         = var.event_time_field
-    MOCK_DEST_URL            = var.mock_dest_url # test-lab alert sink; empty in prod
+    LOG_TYPE_FIELD   = var.log_type_field
+    EVENT_TIME_FIELD = var.event_time_field
+    MOCK_DEST_URL    = var.mock_dest_url # test-lab alert sink; empty in prod
     # Batch <-> single-event knob. Overrides host.json's maxEventBatchSize at
     # runtime (the AzureFunctionsJobHost__ prefix maps to host.json). 1 = process
     # one event per invocation (lowest cost-efficiency, for low-volume/latency-
@@ -70,9 +70,9 @@ resource "azurerm_function_app_flex_consumption" "app" {
     # isn't a secret and is a plain variable; the token is, via a Key Vault
     # reference - this is the engine's runtime vault (module.keyvault), never
     # the CI-only vault.
-    TORQ_DEV_URL   = var.torq_dev_url
-    TORQ_DEV_TOKEN = "@Microsoft.KeyVault(SecretUri=${var.kv_uri}secrets/torq-dev-token/)"
-    TORQ_PROD_URL  = var.torq_prod_url
+    TORQ_DEV_URL                          = var.torq_dev_url
+    TORQ_DEV_TOKEN                        = "@Microsoft.KeyVault(SecretUri=${var.kv_uri}secrets/torq-dev-token/)"
+    TORQ_PROD_URL                         = var.torq_prod_url
     TORQ_PROD_TOKEN                       = "@Microsoft.KeyVault(SecretUri=${var.kv_uri}secrets/torq-prod-token/)"
     SIGNALS_SINK_URL                      = var.signals_sink_url
     APPLICATIONINSIGHTS_CONNECTION_STRING = var.app_insights_conn

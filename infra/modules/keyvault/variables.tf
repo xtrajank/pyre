@@ -8,8 +8,8 @@ variable "name_suffix" {
   default = "kv" # distinguishes multiple vault instances in one deployed instance, e.g. "kv" vs "ci-kv"
 }
 variable "reader_principal_ids" {
-  type    = list(string)
-  default = []
+  type        = list(string)
+  default     = []
   description = <<-EOT
     Identities granted "Key Vault Secrets User" on THIS vault only. Least
     privilege by construction: the engine's runtime vault grants only the
