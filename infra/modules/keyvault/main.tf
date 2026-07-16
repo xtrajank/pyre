@@ -1,21 +1,22 @@
-# Secrets safe. Private endpoint, no public access, RBAC (not access policies).
-# This module is instantiated TWICE (see infra/main.tf): one vault for the
-# engine's runtime secrets (Torq tokens, Cribl creds - read by the processor
-# Managed Identity), and a SEPARATE vault for CI-only secrets (read by the
-# Azure Pipelines publisher service connection). Two vaults, not one with two
-# roles, so a compromised identity on one side can never read the other
-# side's secrets - the processor MI is never granted a role on the CI vault,
-# and the publisher identity is never granted a role on the engine vault.
-# purge_protection guards against accidental deletion.
+# A Key Vault, secrets-safe: private endpoint, no public access, RBAC (not access
+# policies). Instantiated twice (infra/main.tf) - engine-runtime secrets and
+# CI-only secrets - with disjoint readers, so a compromise of one identity cannot
+# read the other vault's secrets.
 data "azurerm_client_config" "current" {}
 resource "azurerm_key_vault" "kv" {
-  name                          = "${var.name_prefix}-${var.name_suffix}"
-  location                      = var.location
-  resource_group_name           = var.resource_group_name
-  tenant_id                     = data.azurerm_client_config.current.tenant_id
-  sku_name                      = "standard"
-  rbac_authorization_enabled    = true
-  purge_protection_enabled      = true
+  name                       = "${var.name_prefix}-${var.name_suffix}"
+  location                   = var.location
+  resource_group_name        = var.resource_group_name
+  tenant_id                  = data.azurerm_client_config.current.tenant_id
+  sku_name                   = "standard"
+  rbac_authorization_enabled = true
+  # Prod locks the vault against permanent deletion (and its name for 90 days).
+  # A dev instance turns this off so it can be destroyed and rebuilt under the
+  # same name_prefix - otherwise every rebuild hits "VaultAlreadyExists" on a
+  # soft-deleted, purge-protected remnant. Retention is the Azure minimum (7)
+  # when unprotected so remnants clear fast, the 90-day maximum when protected.
+  purge_protection_enabled      = var.purge_protection_enabled
+  soft_delete_retention_days    = var.purge_protection_enabled ? 90 : 7
   public_network_access_enabled = false # reached only via the private endpoint below
   tags                          = var.tags
 }
@@ -36,11 +37,13 @@ resource "azurerm_private_endpoint" "pe" {
   }
   tags = var.tags
 }
-# One role assignment per granted reader - see reader_principal_ids for why
-# this is a list instead of a single hardcoded identity.
+# count, not for_each: reader ids are Managed Identity object IDs created in this
+# same apply (values unknown at plan), and for_each needs known keys. A list's
+# LENGTH is known, so count plans cleanly. Tradeoff: positional - reordering
+# re-creates assignments; callers pass a fixed single-element list, so it doesn't.
 resource "azurerm_role_assignment" "secrets_user" {
-  for_each             = toset(var.reader_principal_ids)
+  count                = length(var.reader_principal_ids)
   scope                = azurerm_key_vault.kv.id
   role_definition_name = "Key Vault Secrets User"
-  principal_id         = each.value
+  principal_id         = var.reader_principal_ids[count.index]
 }

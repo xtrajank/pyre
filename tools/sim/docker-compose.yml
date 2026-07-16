@@ -1,0 +1,53 @@
+# A full pyre pipeline on one machine, with no Azure and no cost.
+#
+# The point of this env over `tools/testlab/run_local.py` is FIDELITY on the two
+# axes where a local run silently lies:
+#
+#   redis  - testlab uses fakeredis, which accepts `EXPIRE key ttl NX` (Redis
+#            7.0+ syntax) that Azure Cache for Redis 6.0 rejects outright. This
+#            runs a REAL Redis 6.0, the same major version Azure Cache for Redis
+#            Basic/Standard/Premium serves, so the dedup/threshold/storm Lua and
+#            every command it issues is checked against the real server.
+#            tests/requirements.txt asks for exactly this check.
+#
+#   python - the Function App runs 3.11 (infra/modules/function_app/main.tf
+#            runtime_version). The `pyre deps` gate is only as truthful as CI's
+#            interpreter matching the runtime's, so the sim pins 3.11 too - not
+#            whatever the developer's laptop happens to have.
+#
+# Run:  docker compose -f tools/sim/docker-compose.yml run --rm sim
+
+services:
+  redis:
+    # 6.0 deliberately - the version Azure Cache for Redis actually serves.
+    # Do NOT "upgrade" this to 7.x: the whole reason it exists is to catch
+    # 7.0-only syntax before Azure does.
+    image: redis:6.0-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  sim:
+    build:
+      context: ../..
+      dockerfile: tools/sim/Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    # The image already COPYs the repo (so it runs standalone in CI), but mount
+    # it too: an edit to a test or to the engine is then picked up by the next
+    # `run` with no rebuild. The pip layer is what's slow, and that stays cached.
+    volumes:
+      - ../..:/pyre
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      # No TLS/Entra against a local container; StateStore takes an injected
+      # client in the sim, exactly as testlab/tests do.
+      REDIS_USE_ENTRA: "false"
+      PYRE_ENV: dev
+      PYTHONUNBUFFERED: "1"
+    working_dir: /pyre
+    command: ["python", "-m", "pytest", "tools/sim/test_e2e.py", "-v", "--tb=short", "-p", "no:cacheprovider"]

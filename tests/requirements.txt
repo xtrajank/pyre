@@ -1,0 +1,17 @@
+# What `pyre test` needs. The engine's own deps come first because the tests
+# exercise the real engine (and the real detections it loads), not stubs.
+-r ../engine/requirements.txt
+
+pytest
+
+# fakeredis stands in for Azure Cache for Redis in tests. The [lua] extra is
+# REQUIRED, not optional: StateStore's dedup/threshold/storm windows are Lua
+# scripts (see engine/pyre_engine/dedup.py), and without lupa fakeredis rejects
+# EVAL and every state test fails.
+#
+# CAUTION: fakeredis is more permissive than a real server - it accepts
+# `EXPIRE key ttl NX`, which is Redis 7.0+ syntax that Azure Cache for Redis
+# (6.0) rejects outright. Passing here is necessary, not sufficient; anything
+# touching Redis command syntax deserves a check against a real 6.0 server
+# (docker run redis:6.0) before it ships.
+fakeredis[lua]

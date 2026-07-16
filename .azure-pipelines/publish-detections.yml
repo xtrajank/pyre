@@ -99,12 +99,17 @@ jobs:
           steps:
             - checkout: self
 
+            # MUST match infra/modules/function_app's runtime_version: the `pyre
+            # deps` gate below is only truthful if this interpreter matches the
+            # one the engine actually runs on.
             - task: UsePythonVersion@0
               inputs: { versionSpec: "3.11" }
               displayName: Use Python 3.11
 
-            - script: pip install pyyaml azure-identity azure-storage-blob
-              displayName: Install deps
+            # engine/requirements.txt (not just the CLI's own deps) so `pyre deps`
+            # checks the bundle against the same package set the deployed engine has.
+            - script: pip install -r engine/requirements.txt azure-storage-blob
+              displayName: Install deps (engine env, for the import gate)
 
             # Same-org Azure Repos Git DaC repo: no PAT needed, the pipeline's
             # own OAuth token can clone it (see one-time setup step 6). For a
@@ -120,6 +125,14 @@ jobs:
               env:
                 SYSTEM_ACCESSTOKEN: $(System.AccessToken)
                 DAC_REF: $(Build.SourceVersion)   # pins the exact DaC commit that triggered this run
+
+            # The gate for the hot-reload-vs-deploy split. Detections reload in
+            # ~45s; engine/requirements.txt is only installed on DEPLOY. Without
+            # this, a DaC push that adds an import publishes fine and the
+            # detection then silently fails to load on every worker - a coverage
+            # hole whose only symptom is a log warning. Fail here instead.
+            - script: ./cli/pyre deps
+              displayName: check bundle imports resolve against engine/requirements.txt
 
             # identityMode: federated - log in via the WIF service connection first;
             # pyre publish's DefaultAzureCredential() picks that session up (the

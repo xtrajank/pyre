@@ -4,9 +4,29 @@ output "function_app_name" {
   value       = "${var.name_prefix}-proc"
   description = "Name of the Function App to `func azure functionapp publish`."
 }
-output "eventhub_namespace_fqdn" {
-  value       = module.eventhub.namespace_fqdn
-  description = "Point Cribl (and python_shipper.py) at this, hub `logs-in`."
+output "eventhub_namespace_fqdns" {
+  value       = local.namespace_fqdns
+  description = "namespace -> FQDN. Point Cribl / python_shipper.py at the right one. For hub names use `eventhub_hub_names` - never a literal."
+}
+
+# The hubs that actually exist, straight from config/sources.yaml. Emitted
+# because the hub name is the single easiest thing to get wrong: it is just a
+# string on both sides, so pointing Cribl (or the processor) at a hub that was
+# never created ingests or evaluates nothing, silently. Cross-check against
+# `processor_eventhub_name`.
+output "eventhub_hub_names" {
+  value       = module.eventhub.hub_names
+  description = "Every hub this instance creates. Cribl must send to one of these."
+}
+
+output "processor_eventhub_names" {
+  value       = module.function_app.eventhub_names
+  description = "Every hub the processor consumes (one Event Hubs trigger each). Should equal eventhub_hub_names - a hub missing from here ingests logs that nothing evaluates. Asserted by `terraform test`."
+}
+
+output "default_hubs" {
+  value       = local.ns_default_hubs
+  description = "namespace -> its catch-all hub(s). Point that feed's fallback route here: any log type without its own hub lands here and is evaluated identically."
 }
 output "storage_account_name" {
   value       = module.storage.account_name

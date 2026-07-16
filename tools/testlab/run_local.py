@@ -71,7 +71,10 @@ def main():
         BUNDLE_MODE="local",
         BUNDLE_LOCAL_DIR=args.bundle,
         SIGNALS_SINK_URL=f"http://127.0.0.1:{port}/signals",
-        MOCK_DEST_URL=f"http://127.0.0.1:{port}/alert",
+        DESTINATION_MOCK_URL=f"http://127.0.0.1:{port}/alert",
+        # Routing is explicit per instance (Terraform: default_routes);
+        # the engine no longer infers it from PYRE_ENV.
+        DEFAULT_ROUTES="mock",
         DESTINATIONS_PATH=os.path.join(REPO, "config", "destinations.yaml"),
     )
 

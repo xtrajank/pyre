@@ -22,21 +22,60 @@ jobs:
   - job: detections
     displayName: Validate + test detections/engine
     steps:
+      # MUST match infra/modules/function_app's runtime_version: `pyre deps`
+      # resolves the bundle's imports against THIS interpreter, so on any other
+      # version the gate is answering a question nobody asked.
       - task: UsePythonVersion@0
         inputs: { versionSpec: "3.11" }
         displayName: Use Python 3.11
 
-      - script: pip install pyyaml pytest
-        displayName: Install deps
+      # tests/requirements.txt, not a hand-listed pair. It pulls in
+      # engine/requirements.txt, which the tests need (they exercise the real
+      # engine, and fakeredis[lua] is required for the Redis-backed state tests)
+      # and which `pyre deps` needs to tell the truth. `pip install pyyaml
+      # pytest` could never have run `pyre test` at all.
+      - script: pip install -r tests/requirements.txt
+        displayName: Install deps (engine + test)
+
+      # Fetch the bundle FIRST. Without this, everything below was a no-op that
+      # exited 1: .bundle/ is gitignored, so `validate` found no bundle and
+      # printed "no bundle. Run `pyre pull` first." on every run. DAC_TOKEN is
+      # only needed for a private DaC repo (a same-org Azure Repos Git repo needs
+      # no PAT - see publish-detections.yml).
+      - script: ./cli/pyre pull
+        displayName: pyre pull (fetch the DaC bundle)
+        env:
+          DAC_TOKEN: $(DAC_TOKEN)
 
       - script: ./cli/pyre validate
         displayName: pyre validate
+
+      # The hot-reload-vs-deploy gate: detections reload in ~45s, but
+      # engine/requirements.txt only installs on DEPLOY, so a DaC push that adds
+      # an import goes live into an interpreter that lacks it and the detection
+      # silently stops covering. Fail here instead.
+      - script: ./cli/pyre deps
+        displayName: pyre deps (bundle imports resolve against the engine env)
 
       - script: ./cli/pyre build
         displayName: pyre build
 
       - script: ./cli/pyre test
         displayName: pyre test
+
+  - job: sim
+    displayName: End-to-end vs real Redis 6.0
+    steps:
+      # The engine against a REAL Redis 6.0 (the version Azure Cache for Redis
+      # serves), on Python 3.11, plus the prod routing branch and the
+      # concurrency paths. fakeredis - which the `detections` job uses - accepts
+      # Redis 7.0 syntax that Azure rejects, so this is the job that can
+      # actually tell you dedup will work in Azure. See tools/sim/README.md.
+      - script: docker compose -f tools/sim/docker-compose.yml run --rm sim
+        displayName: tools/sim e2e suite
+      - script: docker compose -f tools/sim/docker-compose.yml down -v
+        displayName: tear down
+        condition: always()
 
   - job: terraform
     displayName: Terraform fmt + validate
@@ -57,5 +96,12 @@ jobs:
           terraform -chdir=infra fmt -check -recursive
           terraform -chdir=infra init -backend=false
           terraform -chdir=infra validate
-          echo "terraform plan runs at deploy time, with real cloud creds (a service connection) - see docs/PRODUCTION.md"
         displayName: fmt + validate
+
+      # A real plan of the whole graph against a MOCK provider: no subscription,
+      # no service connection, no cost. Catches what a plan read by eye does not
+      # - a greenfield plan regression, a SKU/cost change, a publicly-reachable
+      # resource, a shared-key auth path, an inlined secret, a trigger bound to a
+      # hub that does not exist, and a hub left with no consumer.
+      - script: terraform -chdir=infra test
+        displayName: plan + posture assertions (offline)

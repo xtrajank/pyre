@@ -4,7 +4,6 @@
 # Everything here just runs the same terraform/func/pyre commands the guides show;
 # if you don't have `make` (e.g. Windows), run those directly.
 ENV       ?= dev
-STATE_KEY ?= $(ENV).tfstate
 PREFIX    ?= pyre$(ENV)          # must match name_prefix in envs/$(ENV).tfvars
 TF        := terraform -chdir=infra
 
@@ -12,7 +11,11 @@ TF        := terraform -chdir=infra
         pull build validate test publish deploy-engine deploy-mock
 
 # --- infrastructure (ENV picks the instance) --------------------------------
-init:    ; $(TF) init -backend-config="key=$(STATE_KEY)" -reconfigure
+# Local state by default (matches infra/backend.tf). For a remote azurerm backend,
+# uncomment the block in infra/backend.tf and pass its per-instance key, e.g.:
+#   make init BACKEND_CONFIG='-backend-config=key=prod.tfstate'
+BACKEND_CONFIG ?=
+init:    ; $(TF) init $(BACKEND_CONFIG) -reconfigure
 plan:    ; $(TF) plan    -var-file=envs/$(ENV).tfvars
 apply:   ; $(TF) apply   -var-file=envs/$(ENV).tfvars
 destroy: ; $(TF) destroy -var-file=envs/$(ENV).tfvars

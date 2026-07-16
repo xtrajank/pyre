@@ -4,6 +4,41 @@ This is the single master document for pyre. It is written to take someone from 
 
 If a term is unfamiliar, it's defined in the **[GLOSSARY](GLOSSARY.md)** — keep it open in a second tab.
 
+> ### Before you deploy
+>
+> **Work [tools/PRODUCTION_CHECKLIST.md](../tools/PRODUCTION_CHECKLIST.md)
+> alongside this guide** — it is the operational companion to these chapters, and
+> it exists because an end-to-end test run (`tools/sim/`,
+> `infra/tests/plan.tftest.hcl`) found defects this document's happy path did not
+> account for.
+>
+> Still open, and yours to decide:
+> - **`config/detections.yaml` pins `ref: laptop-test`** — a branch, so prod
+>   changes whenever someone pushes to it. Pin a tag or SHA (§6.1).
+> - **§10.1's `func azure functionapp publish` cannot reach the app** from
+>   outside the VNet: `public_network_access_enabled = false` (§18.1). You need
+>   an agent inside the VNet or a temporary exception.
+> - **Verify Cribl can authenticate with Entra/OAuth** before cutover —
+>   `local_authentication_enabled = false` disables SAS entirely (§11).
+>
+> Fixed, and worth knowing because they shaped the guidance below:
+> - **The processor subscribed to a hub nothing creates** (`logs-in`), and
+>   declared a **single trigger** for a multi-hub `sources.yaml`. Both plan and
+>   apply green and evaluate nothing. Hub names are now derived from
+>   `sources.yaml`, one trigger is registered per hub, and `terraform test`
+>   asserts every name is real and every hub has a consumer.
+> - **`config/sources.yaml` now marks one hub `default: true`** — the catch-all
+>   Cribl sends anything without a dedicated hub to. It is what lets `pyre
+>   validate` accept a 1000-detection DaC fork (§6.2, §11).
+> - `torq_prod` shipped `enabled: false`, which made **every prod alert fail to
+>   deliver** — the Dispatcher skips registering a disabled destination (§11).
+> - An unset `signals_sink_url` **silently discarded every signal**; it now warns
+>   once per worker at cold start (§13).
+> - **CI's `detections` job had never passed** — it validated without ever
+>   pulling a bundle, so none of the above was caught. Fixed in both pipelines.
+> - Routing is the Terraform `default_routes` variable, per instance (the old
+>   dead `config/envs/*.yaml` have been removed).
+
 ## Contents
 
 1. [Executive summary (for leadership)](#1-executive-summary)
@@ -82,9 +117,9 @@ Every Azure resource, what it's for, and its name (with `pyre` as the `name_pref
 
 | Component | Azure resource | Name | Role |
 |---|---|---|---|
-| **Ingestion bus** | Event Hubs namespace + `logs-in` hub | `pyre-ehns` | The high-throughput pipe Cribl sends logs into. Delivers logs to the engine in **batches** (the key cost lever). Sized from `config/sources.yaml`. |
+| **Ingestion bus** | Event Hubs namespace + one hub per source | `pyre-ehns` | The high-throughput pipe Cribl sends logs into. Delivers logs to the engine in **batches** (the key cost lever). Hubs and their partitions/retention are sized from `config/sources.yaml`; `terraform output eventhub_hub_names` lists what exists. |
 | **Compute (the engine)** | Function App (Flex Consumption) | `pyre-proc` | Runs the detection code. Triggered by Event Hub batches. Scales 0→1000 instances with load. Holds all detections in one app (not one app per detection). |
-| **State store** | Azure Cache for Redis | `pyre-redis` | Remembers dedup counts, thresholds, `unique()` counts, and the storm limiter between logs. Azure Functions are stateless, so this external memory is essential. |
+| **State store** | Azure Managed Redis | `pyre-redis` | Remembers dedup counts, thresholds, `unique()` counts, and the storm limiter between logs. Azure Functions are stateless, so this external memory is essential. (Azure Managed Redis, `Microsoft.Cache/redisEnterprise` — the classic Azure Cache for Redis is retiring and no longer creatable. TLS port 10000, private DNS `redis.azure.net`.) |
 | **Secrets** | **Two** Key Vaults | `pyre-kv`, `pyre-ci-kv` | `pyre-kv` holds engine runtime secrets (Torq token, Cribl creds) - readable only by the processor MI. `pyre-ci-kv` holds CI-only secrets - readable only by the publisher service connection. Split so a compromise of one identity can't reach the other vault's secrets. |
 | **Storage** | Storage account (3 containers) | `pyrestor` | `bundle` = the engine's own deploy package; `detections` = published detection bundles; `checkpoints` = Event Hub read positions. |
 | **Identity** | User-assigned Managed Identity | `pyre-mi` | The one identity the engine uses to authenticate to Event Hub, Redis, Blob, and Key Vault — no passwords anywhere. |
@@ -100,9 +135,9 @@ The engine code (in [engine/](../engine/README.md)) is small and modular: `funct
 ## 4. How a log flows through it (two worked examples)
 
 **A log that becomes an alert:**
-1. Cribl normalizes an Okta log, stamps `p_log_type = Okta.SystemLog`, and sends it to `pyre-ehns` / `logs-in`.
+1. Cribl normalizes an Okta log, stamps `dataset = Okta.SystemLog` (the `log_type_field`, §6.3 — Cribl's own name; Panther-style feeds use `p_log_type`), and sends it to `pyre-ehns` / the hub `config/sources.yaml` sizes for that source.
 2. Event Hubs delivers a **batch** of logs to `pyre-proc`. Azure spins up an instance if none is warm (a few-second cold start; invisible for background work).
-3. The engine reads `p_log_type` and looks up which detections apply (Palo logs never run Okta rules).
+3. The engine reads `dataset` and looks up which detections apply (Palo logs never run Okta rules). A log with no `dataset` is **dropped here, before any rule sees it**, and counted as `missing the 'log type' field` — never silently.
 4. It runs each detection's `rule(log)`. Say `OktaAdminRoleAssigned` returns `True`.
 5. It **always writes a signal** (the audit record: "this detection matched this log").
 6. It computes a **dedup string** (e.g. `okta:admin:jdoe`) and does an atomic increment in Redis with a 1-hour expiry.
@@ -128,7 +163,7 @@ There is **one** Terraform composition (`infra/`). You deploy it as many **insta
 | `name_prefix` | n/a | `pyredev` | `pyreprod` |
 | Cost | $0 | cheapest SKUs (`cost_profile = test`) | scaled (`cost_profile = scale`) |
 | Network | none | fully private, `10.0.0.0/16` | fully private, `10.1.0.0/16` |
-| Redis | fake (in-memory) | Basic C0 | Premium, clustered |
+| Redis | fake (in-memory) | Managed Redis `Balanced_B0` | Managed Redis `Balanced_B5`+ |
 | Event Hubs | none | Standard, 1 TU | Standard, auto-inflating |
 | Function App | not deployed (run in-process) | Flex, scale-to-zero | Flex, up to 1000 instances |
 | State key | none | `dev.tfstate` | `prod.tfstate` |
@@ -157,8 +192,12 @@ There are exactly three places you configure pyre. Nothing else needs editing to
 | `bundle.refresh_interval_seconds` | How fast a detection push goes live (default 45s). |
 
 ### 6.2 `config/sources.yaml` and `config/destinations.yaml`
-- **sources** — each log source's LogTypes, its Event Hub, and partition count (higher = more parallelism for a noisy source). Terraform reads this to size Event Hubs.
-- **destinations** — where alerts go (`torq_dev`, `torq_prod`, `mock`). Secrets via Key Vault references, never inline.
+- **sources** — each log source's LogTypes, its Event Hub, and partition count (higher = more parallelism for a noisy source). Terraform reads this to size the hubs *and* to subscribe the processor to every one of them (one Event Hubs trigger per hub, `engine/function_app.py`).
+  - **Exactly one source must set `default: true`** — the catch-all. Cribl sends any log type without a dedicated hub there; the processor consumes it like any other. Terraform fails the plan if there are zero or two.
+  - A log type on the catch-all is handled **identically** — routing is by the event's log-type field, never by which hub it arrived on. A dedicated hub buys **isolation** (a firehose can't starve the rest) and its own **parallelism ceiling**; nothing else. So give a source its own entry when it is high-volume or must not be starved — not merely because it is "important".
+  - The catch-all is deliberately the **cheapest** hub (fewest partitions) because it carries the long tail. Partitions are the parallelism ceiling, so a high-volume source that falls through to it will lag — that lag is the signal to promote it. `terraform test` asserts it stays the cheapest.
+  - This is also what makes `./cli/pyre validate` usable against a 1000-detection panther-analysis fork: an undeclared log type has a real home, so it is a summary line rather than an error (it took the reference fork from 1045 errors to 1).
+- **destinations** — where alerts go (`torq_dev`, `torq_prod`, `mock`). Secrets via Key Vault references, never inline. Read **at startup**, not on the detection refresh — a change needs a restart. `torq_prod` must stay `enabled: true` (§11).
 
 ### 6.3 Terraform variables (`infra/envs/<instance>.tfvars`)
 Copy `infra/envs/dev.tfvars.example` / `prod.tfvars.example` to `<instance>.tfvars` and fill in:
@@ -243,7 +282,9 @@ cp infra/envs/<inst>.tfvars.example infra/envs/<inst>.tfvars
 
 ### 9.3 Init + plan — read the plan, it *is* the architecture
 ```bash
-# from the repo root. The state key is what separates this instance's state.
+# from the repo root. Production uses REMOTE state: uncomment the backend block in
+# infra/backend.tf (bootstrap it via infra/global/backend.tf.example) first. The
+# state key is what separates this instance's state.
 terraform -chdir=infra init  -backend-config="key=<inst>.tfstate"
 terraform -chdir=infra plan  -var-file=envs/<inst>.tfvars
 ```
@@ -275,6 +316,13 @@ cd engine && func azure functionapp publish <name_prefix>-proc --python
 ```
 This uploads `engine/` (the processor) to the Function App. It reads its settings (Event Hub, Redis, Key Vault, Blob — all by managed identity) from the app settings Terraform already wrote.
 
+> **This will not work from a laptop.** The Function App sets
+> `public_network_access_enabled = false` and is VNet-integrated (§18.1), so
+> there is no public endpoint for `func` to publish to. Run it from a
+> **self-hosted agent inside the VNet** (the intended path), or open a
+> temporary, narrow exception and close it immediately afterward — the same
+> pattern §14 uses for pushing samples into Event Hubs.
+
 ### 10.2 Publish the detections
 ```bash
 export BUNDLE_BLOB_ACCOUNT_URL="https://<name_prefix>stor.blob.core.windows.net"
@@ -290,11 +338,111 @@ The running engine hot-reloads within `refresh_interval_seconds`. **In productio
 <a name="11-connect-cribl-torq"></a>
 ## 11. Spin up PART 4 — connect Cribl (in) and Torq (out)
 
-**Cribl → Event Hubs (logs in).** In Cribl, add an Event Hubs (Kafka-compatible) destination pointing at `<name_prefix>-ehns.servicebus.windows.net`, hub `logs-in`, authenticating with the `log_sender` identity you granted in §9.5. Cribl must stamp a log-type field and an event-time field during normalization, plus indicator fields (this is the workstream pyre delegates to Cribl — see `PANTHER_CONVERSION.md` Part 11). By default the engine reads Cribl's own field names — `dataset` for log type, `_time` for event time — via the `log_type_field`/`event_time_field` Terraform variables (§6.3); if your normalizer stamps different names (e.g. Panther-style `p_log_type`/`p_event_time`), set those variables to match instead of relabeling your feed. Confirm partition/routing per `config/sources.yaml`.
+**Cribl → Event Hubs (logs in).** In Cribl, add an Event Hubs (Kafka-compatible) destination pointing at `<name_prefix>-ehns.servicebus.windows.net`, hub = one of `terraform output eventhub_hub_names`, authenticating with the `log_sender` identity you granted in §9.5.
 
-**pyre → Torq (cases out).** In `config/destinations.yaml`, enable `torq_prod`. Set `torq_prod_url` in `infra/envs/<inst>.tfvars` (not a secret - it's a plain Terraform variable, wired straight into the `TORQ_PROD_URL` app setting) and re-apply; store the Torq token in the **engine's** Key Vault, not the CI one (`az keyvault secret set --vault-name <name_prefix>-kv --name torq-prod-token --value <token>`); point the env's default route at `torq_prod`. Republish is not needed for engine code, but the engine reads destinations at startup, so restart the Function App or redeploy the engine to pick up a new destination.
+> **Cribl owns hub routing, and pyre cannot check its half.** By the time the
+> engine sees an event it is already in a hub — the engine reads the log-type
+> field only to pick *detections*. So you must configure, in Cribl:
+> - each log type in `config/sources.yaml` → its declared `hub`; **and**
+> - **a fallback route sending everything else to `terraform output
+>   default_eventhub_name`** (the `default: true` hub).
+>
+> A log type Cribl sends to a hub pyre does not consume is evaluated by
+> **nothing**, silently. The fallback is what guarantees there is always a right
+> answer. Landing on the catch-all is not second-class: it is routed, signalled,
+> deduped and alerted identically. A dedicated hub buys **isolation** and its own
+> **parallelism ceiling** — nothing else. The catch-all deliberately has the
+> fewest partitions, so watch its consumer lag: lag there is the signal that some
+> source has outgrown it and needs its own entry in `sources.yaml`.
 
-**Signals/alerts back to the lake.** Set `signals_sink_url` (a Cribl HTTP source) so every signal and alert is searchable alongside raw logs — this is what makes future AI triage and investigation useful.
+> **Verify Cribl can authenticate with Entra/OAuth before you cut over.** The
+> namespace sets `local_authentication_enabled = false`, which disables SAS
+> entirely. Cribl's Event Hubs destination is commonly configured with a
+> connection string, and **that will not work here**. This is the most likely
+> day-one surprise. Cribl must stamp a log-type field and an event-time field during normalization, plus indicator fields (this is the workstream pyre delegates to Cribl — see `PANTHER_CONVERSION.md` Part 11). By default the engine reads Cribl's own field names — `dataset` for log type, `_time` for event time — via the `log_type_field`/`event_time_field` Terraform variables (§6.3); if your normalizer stamps different names (e.g. Panther-style `p_log_type`/`p_event_time`), set those variables to match instead of relabeling your feed. Confirm partition/routing per `config/sources.yaml`.
+
+**pyre → Torq (cases out).** `torq_prod` must be `enabled: true` in `config/destinations.yaml` — it is the only route `_default_routes()` returns when `PYRE_ENV != dev`, and with `enabled: false` the Dispatcher never registers it, so **every prod alert fails to deliver, re-opens its dedup window, re-fires, and fails again, forever.** (It shipped `false`; that is fixed.) Set `torq_prod_url` in `infra/envs/<inst>.tfvars` (not a secret — it's a plain Terraform variable, wired straight into the `TORQ_PROD_URL` app setting) and re-apply. Store the Torq token in the **engine's** Key Vault, not the CI one, **before** you apply — an unresolvable Key Vault reference fails auth at runtime:
+
+```bash
+az keyvault secret set --vault-name <name_prefix>-kv --name torq-prod-token --value <token>
+```
+
+The engine reads destinations **at startup**, not on the ~45s detection refresh, so restart or redeploy the Function App to pick up a destination change.
+
+> **Keeping dev away from prod Torq.** Routing is `["mock"] if env == "dev" else ["torq_prod"]` — **any** env that isn't exactly `"dev"` routes to Torq prod. The `enabled:` flag is *not* an env gate. What actually protects a lab is leaving `torq_prod_url` unset and never creating `torq-prod-token` in a dev Key Vault, so the Torq adapter raises before it can POST. Rehearse the prod route safely with
+> `docker compose -f tools/sim/docker-compose.yml run --rm sim python tools/sim/run_pipeline.py --env prod`.
+> Full rules: [tools/PRODUCTION_CHECKLIST.md](../tools/PRODUCTION_CHECKLIST.md) §1.
+
+<a name="azure-native-logs"></a>
+### Azure-native logs: a second instance
+
+Most logs reach pyre through Cribl — REST APIs, webhooks, agents, and Azure
+itself. But a subset (Defender XDR, Entra sign-ins, the Activity Log) *starts* in
+Azure, goes out to Cribl, and would come **back** to Azure to reach pyre. That
+round trip costs egress, latency, and Cribl volume for no benefit.
+
+The fix is not to teach one engine to read both feeds. It is **two instances** —
+which is what this composition is already for ("deploy it as many times as you
+like; each deployment is an *instance* selected by a .tfvars file"):
+
+```
+ REST APIs, webhooks, agents ─┐
+ Azure (Defender/Entra/…) ────┼─▶ Cribl ──▶ pyre-ehns ──▶ pyre-cribl instance
+                              │                            dataset / _time
+                              │                            no envelope
+                              │
+                              └─ the SAME Azure Event Hub, read directly ──▶ pyre-azure instance
+                                 (no round trip back out to Cribl)           category / time
+                                                                             envelope: records
+```
+
+**Why two instances is the simple answer, not a cop-out.** The thing that would
+force per-source config into the engine is `log_type_field` being *global*. Split
+the instances and global becomes **correct**: each instance reads exactly one feed
+shape, set in its own tfvars. The engine stays dumb; there is no hub→config map,
+no resolution logic, and no new failure mode. The cost is a second Redis and a
+second Function App — and the Azure feed is the small one, so it can be sized
+accordingly.
+
+| | `pyre-cribl` instance | `pyre-azure` instance |
+|---|---|---|
+| `log_type_field` | `dataset` (Cribl stamps it) | `category` (**Azure** stamps it) |
+| `event_time_field` | `_time` | `time` |
+| `envelope` | *(empty)* — one message, one event | `records` — one message, many records |
+| Event Hubs | **creates** them; Cribl writes in | **reads an existing** namespace Azure already writes to |
+| Auth | Entra only, `local_authentication_enabled = false` | whatever that existing namespace already uses |
+
+**This is why no SAS ever has to touch `pyre-ehns`.** Diagnostic settings need a
+SAS authorization rule — but those Azure logs *already* land in an Event Hub on
+their way to Cribl, so that SAS already exists, in **that** namespace. pyre reads
+it; it does not ask Azure to write anywhere new. `local_authentication_enabled`
+is namespace-wide, so this is the only way to admit Azure-native logs without
+re-opening SAS across every Cribl hub.
+
+**The trap to avoid: double alerts.** Dedup state is per-instance (each has its
+own Redis). That is fine *only while the two feeds are disjoint*. If Cribl still
+forwards Defender XDR to `pyre-ehns` **and** the Azure instance reads it
+directly, both instances match it and both alert — with separate dedup windows
+that cannot collapse. **Remove those log types from Cribl's pyre route** when you
+point the Azure instance at them.
+
+**What the Azure instance still needs** (not built yet — say the word):
+- The composition must skip the `eventhub` module and point at an **existing**
+  namespace (`eventhub_fqdn` + hub names as inputs rather than created).
+- A **dedicated consumer group** on those hubs, or pyre competes with Cribl for
+  partitions and steals its checkpoints.
+- The processor's Managed Identity granted **Event Hubs Data Receiver** on that
+  namespace.
+
+The engine side is done and tested: `envelope`, `log_type_field` and
+`event_time_field` are per-instance app settings, records inside an envelope are
+claimed individually so a redelivery cannot re-signal them, and a feed that is
+not the declared shape fails **loudly** (`no 'records' array … check ENVELOPE
+matches the feed this instance reads`) rather than vanishing.
+
+---
+
+**Signals/alerts back to the lake.** Set `signals_sink_url` (a Cribl HTTP source) so every signal and alert is searchable alongside raw logs — this is what makes future AI triage and investigation useful. **It is optional in Terraform and its absence discards the entire audit trail**; the engine warns once per worker at cold start (`SIGNALS_SINK_URL is not set`) — alarm on that line. Note the POST carries the **full raw event** and sends **no `Authorization` header**, so that URL is effectively a bearer secret and lands in tfstate/app settings in cleartext — keep the endpoint off the public internet.
 
 ---
 
@@ -323,6 +471,32 @@ Take screenshots of the Function App *Overview*, the Event Hubs incoming-message
 ## 13. Monitoring and observability
 
 Everything the engine logs and measures flows to **Log Analytics (`pyre-law`)** via Application Insights. Go to `pyre-law` → **Logs** and run KQL.
+
+**The silent-drop canaries — alarm on these, don't just read them.** This is the
+most important query on the page. Every line it can return is a case where pyre
+is healthy, cheap, quiet, and **not detecting something**. The engine counts
+these once per batch (never per event, which at 4–5 TB/day would be a ~50k
+records/sec firehose costing the most exactly when the system is least healthy),
+so a non-zero result is always worth a human.
+
+```kusto
+traces
+| where timestamp > ago(1h)
+| where message has_any (
+    "batch dropped",                 // malformed JSON, or no log-type field -> never evaluated
+    "missing the 'log type' field",
+    "matches no enabled detection",  // how a log-type rename silently kills coverage
+    "skipping detection",            // a detection that won't import = a coverage hole
+    "failed to deliver",             // alerts not reaching Torq
+    "storm limit hit",               // alerts dropped by the limiter
+    "SIGNALS_SINK_URL is not set",   // the entire audit trail is being discarded
+    "DEFAULT_ROUTES is empty")       // alerts have nowhere to go by default
+| order by timestamp desc
+```
+
+`skipping detection` is the one `pyre deps` exists to prevent: detection code
+hot-reloads in ~45s, but `engine/requirements.txt` only installs on **deploy**,
+so a DaC push that adds an import goes live into an interpreter that lacks it.
 
 **Is the engine running and healthy?**
 ```kusto
@@ -383,7 +557,7 @@ az eventhubs namespace network-rule-set ip-rule add \
 az eventhubs namespace update -n <name_prefix>-ehns -g rg-pyre-<env> --public-network-access Enabled
 # 2) push samples
 python tools/testlab/python_shipper.py \
-  --namespace <name_prefix>-ehns.servicebus.windows.net --hub logs-in \
+  --namespace <name_prefix>-ehns.servicebus.windows.net --hub <a hub from `terraform output eventhub_hub_names`> \
   --file tools/testlab/samples/palo_sample.jsonl --rate 50
 # 3) REMOVE the exception afterward
 az eventhubs namespace update -n <name_prefix>-ehns -g rg-pyre-<env> --public-network-access Disabled
@@ -425,8 +599,8 @@ It works by overriding `host.json` at runtime via the app setting `AzureFunction
 **The Panther "Lambda vs Fargate" analogue.** For a source that is high-volume 24/7, always-on containers can beat per-execution billing. The same engine package runs on **Azure Container Apps** unchanged (only the entry point differs). Start everything on Flex; move a single sustained-high-volume source to Container Apps only if the math says so.
 
 **Cost shape (approximate, region-dependent — verify with the Azure Pricing Calculator):**
-- *dev* (`test`): Redis Basic C0 (~$16/mo) + Event Hubs 1 TU (~$11–22/mo) + 4 private endpoints (~$29/mo) + small Log Analytics ≈ **$60–80/mo if left on**; destroy when idle to pay ~nothing.
-- *prod* (`scale`): Premium Redis + auto-inflating Event Hubs + always-warm capacity — sized to your real volume; compute is pay-per-use and dominated by log volume, not idle time.
+- *dev* (`test`): Managed Redis `Balanced_B0` (billed hourly, the dominant line item — verify on the Managed Redis pricing page, and pricier than the retired Basic C0) + Event Hubs 1 TU (~$11–22/mo) + 4 private endpoints (~$29/mo) + small Log Analytics; **destroy when idle** — with Redis billed by the hour this matters more than under the old Basic cache.
+- *prod* (`scale`): larger Managed Redis (`Balanced_B5` floor, sized to your dedup memory model) + auto-inflating Event Hubs + always-warm capacity — sized to your real volume; compute is pay-per-use and dominated by log volume, not idle time.
 
 The levers to tune cost/log: `maxEventBatchSize`, partition counts, Redis tier, and moving a firehose source to Container Apps. Measure with the cost breakdown by tag (every resource is tagged `system`/`env`/`owner`).
 

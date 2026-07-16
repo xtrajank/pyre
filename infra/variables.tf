@@ -17,7 +17,7 @@ variable "name_prefix" {
 variable "env" {
   type        = string
   default     = "dev"
-  description = "Environment label. Tags resources and sets PYRE_ENV, which drives default alert routing (dev -> mock, otherwise -> Torq)."
+  description = "Environment label. Tags resources and sets PYRE_ENV. It does NOT drive alert routing - that is `default_routes`, explicitly, per instance."
 }
 
 variable "location" {
@@ -33,13 +33,28 @@ variable "resource_group_name" {
 variable "cost_profile" {
   type        = string
   default     = "test"
-  description = "test = cheapest SKUs (Redis Basic C0, Event Hubs 1 TU, Flex 0 always-ready). scale = Premium clustered Redis, auto-inflating Event Hubs, Flex up to 1000 instances."
+  description = "test = cheapest SKUs (Azure Managed Redis Balanced_B0, Event Hubs 1 TU, Flex 0 always-ready). scale = larger Managed Redis (Balanced_B5 floor), auto-inflating Event Hubs, Flex up to 1000 instances."
 }
 
 variable "owner" {
   type    = string
   default = "secops"
 }
+
+variable "key_vault_purge_protection" {
+  type        = bool
+  default     = true
+  description = <<-EOT
+    Purge protection on both vaults. true (default, prod): a soft-deleted vault
+    can't be purged for 90 days, so secrets survive an accidental delete - but the
+    name is reserved for 90 days too, blocking a same-name rebuild. false (dev):
+    purge immediately and reuse the name. Never false in production.
+  EOT
+}
+
+# NOTE: there is no deployer IP allowlist. Every resource is always private,
+# reached only from inside the VNet. Deploy from a VNet-resident agent/VM; RBAC
+# governs the deployer's identity, VNet membership governs reachability.
 
 # --- Network (give each instance its own CIDR if they will peer) --------------
 variable "address_space" {
@@ -102,29 +117,22 @@ variable "publisher" {
   description = "The CI identity that runs `pyre publish` (writes detection bundles to the `detections` Blob container and reads the CI-only Key Vault). Leave principal_id empty (the default) to skip granting write access until it's known."
 }
 
-# --- Feed field mapping ---------------------------------------------------
-# Which field on each incoming event the engine reads to (a) pick which
-# detections apply and (b) stamp the time on signals/alerts. This repo's
-# reference normalizer is Cribl, whose own field names are `dataset` (not
-# Panther's `p_log_type` convention) and `_time` - those are the defaults
-# below. Any feed can override both: point log_type_field at whatever field
-# your normalizer uses to mark log type (Cribl: dataset; a Panther-style
-# pipeline: p_log_type; your own: whatever you call it), and event_time_field
-# at whatever carries the event's original timestamp (Cribl: _time; Panther-
-# style: p_event_time). This is safe to change freely: both are read with a
-# safe default/skip (see engine/pyre_engine/processor.py) - a misconfigured
-# name degrades to "no detections match" or "blank timestamp," never a
-# security-relevant failure, since alert dedup/threshold windowing uses Redis
-# TTLs, not these fields.
-variable "log_type_field" {
-  type        = string
-  default     = "dataset"
-  description = "Event field the engine reads to select which detections run (Cribl's own field is `dataset`; a Panther-style feed would use `p_log_type`)."
-}
-variable "event_time_field" {
-  type        = string
-  default     = "_time"
-  description = "Event field the engine reads for the signal/alert timestamp (Cribl's own field is `_time`; a Panther-style feed would use `p_event_time`)."
+# NOTE: feed shape (log-type field, event-time field, envelope) is now declared
+# PER NAMESPACE in config/sources.yaml, so one instance can consume feeds of
+# different shapes. It is no longer a root variable.
+
+# --- Governance: who may change this instance ---------------------------------
+variable "admin_principal_ids" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Entra OBJECT IDs allowed to change this instance (run terraform apply). A
+    user, group, or service-principal object id - company users already exist, so
+    map them by id (prefer a group: then adding a person is group membership, no
+    terraform run). Each is granted Contributor + User Access Administrator on
+    the resource group. Empty (default) grants nobody via Terraform.
+    Your own id: az ad signed-in-user show --query id -o tsv
+  EOT
 }
 
 # --- Engine tuning ------------------------------------------------------------
@@ -136,33 +144,82 @@ variable "storm_limit" {
   type    = number
   default = 1000 # alerts/detection/hour before the storm limiter suppresses dispatch
 }
+variable "idempotency_ttl_seconds" {
+  type        = number
+  default     = 900
+  description = <<-EOT
+    How long a processed event id is remembered so an at-least-once redelivery
+    isn't counted twice. THE MAIN REDIS SIZING KNOB: the only key written per
+    EVENT, so resident keys ~= events/sec x this (~50k/s x 900s ~= 45M keys,
+    ~4-5GB). It only has to outlive a checkpoint retry (seconds-minutes), so 15
+    min is generous. Too low -> a late redelivery duplicates signals (alerts still
+    collapse on dedup).
+  EOT
+}
+variable "worker_process_count" {
+  type        = number
+  default     = 4
+  description = <<-EOT
+    Worker PROCESSES per instance (FUNCTIONS_WORKER_PROCESS_COUNT). rule() is
+    CPU-bound, so processes - not threads - buy real parallelism (threads share
+    one GIL). Each process holds its own Processor (bundle + Redis pool), trading
+    instance_memory_in_mb for CPU.
+  EOT
+}
+variable "threads_per_worker" {
+  type        = number
+  default     = 4
+  description = "Threads per worker process (PYTHON_THREADPOOL_THREAD_COUNT): concurrent batches sharing one Processor. Buys overlap across Redis/Cribl waits, not CPU. Raise only if workers are I/O-parked, not pegged."
+}
 variable "max_event_batch_size" {
   type        = number
   default     = 256
   description = <<-EOT
-    Max events the engine processes per invocation — the batch<->single-event knob.
-    256 = batched (scalable default). 1 = single-event (one invocation per event;
-    for a low-volume, latency-critical instance where cost doesn't matter).
-    This is a CEILING, not a wait: small backlogs are delivered immediately, so a
-    high value does not delay alerts at low volume. Latency is dominated by cold
-    starts and Cribl's flush interval, not this — see docs/PRODUCTION.md § 15.
+    Max events per invocation. 256 = batched (scalable default); 1 = single-event
+    (low-volume, latency-critical). A CEILING, not a wait - small backlogs deliver
+    immediately, so a high value never delays alerts at low volume.
   EOT
 }
 variable "signals_sink_url" {
   type    = string
   default = "" # Cribl HTTP source for the signals/alerts write-back
 }
-variable "mock_dest_url" {
-  type    = string
-  default = "" # optional non-Torq alert sink (webhook/test mock)
+
+# --- Alert destinations -------------------------------------------------------
+variable "destinations" {
+  type = map(object({
+    url          = optional(string, "")
+    token_secret = optional(string, "")
+  }))
+  default     = {}
+  description = <<-EOT
+    Per-instance destination values, keyed by the `name` in
+    config/destinations.yaml (the `kind` and adapter live there / in dispatch.py,
+    so nothing here is vendor-named). Each entry becomes:
+        DESTINATION_<NAME>_URL     = url                        (not a secret)
+        DESTINATION_<NAME>_TOKEN   = KV reference to token_secret
+    token_secret is the SECRET NAME in the engine's Key Vault, not the token; omit
+    it for an auth-less destination. A dev instance declares only its mock sink
+    and NO production destination - that is what keeps it unable to page prod.
+
+    Example:
+      destinations = {
+        mock      = { url = "https://<mock-func>/api/alert" }
+        torq_prod = { url = "https://<torq-webhook>", token_secret = "torq-prod-token" }
+      }
+  EOT
 }
-variable "torq_dev_url" {
-  type    = string
-  default = "" # Torq webhook URL for torq_dev (config/destinations.yaml). Not secret; the token below is.
-}
-variable "torq_prod_url" {
-  type    = string
-  default = "" # Torq webhook URL for torq_prod
+
+variable "default_routes" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Destinations an alert goes to when its detection names none (a rule's
+    destinations(event) overrides). Values are `name`s from
+    config/destinations.yaml. THE CONTROL THAT KEEPS A LAB OFF PRODUCTION: routing
+    is explicit per instance, not inferred from `env`. Empty = such alerts are not
+    delivered (loudly, at cold start), almost always a misconfiguration.
+  EOT
 }
 
 # --- Event Hubs scaling (only used when cost_profile = "scale") ---------------

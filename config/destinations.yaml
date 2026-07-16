@@ -1,21 +1,32 @@
-# Declarative alert destinations. Add an INSTANCE here; add a new KIND only by
-# adding an adapter in engine/pyre_engine/dispatch.py. Secrets come from
-# Key Vault via *_env references, never inline.
+# Alert destinations. Three layers, nothing vendor-specific below the top:
+#   this file   - which destinations exist, each one's `kind`, and the env-var
+#                 names carrying its url/token.
+#   Terraform   - per-instance values (var.destinations) -> DESTINATION_<NAME>_URL
+#                 / DESTINATION_<NAME>_TOKEN app settings.
+#   dispatch.py - one adapter per kind (mock / webhook / torq).
+# Swapping tools = a `kind` here (+ an adapter if new) and a tfvars value.
+#
+# `name` is the key a detection's destinations() and Terraform default_routes
+# reference. Secrets are Key Vault references via token_env, never inline. WHICH
+# destination an alert reaches is default_routes per instance - not this file.
+# `enabled: false` means the Dispatcher never registers the route, so anything
+# routed there fails forever; it is NOT an environment gate. A lab stays off a
+# destination by simply not declaring it in that instance's tfvars.
 
 destinations:
   - name: mock                 # test-lab sink
     kind: mock
     enabled: true
-    url_env: MOCK_DEST_URL
+    url_env: DESTINATION_MOCK_URL
 
   - name: torq_dev
     kind: torq
     enabled: true
-    url_env: TORQ_DEV_URL
-    token_env: TORQ_DEV_TOKEN   # Key Vault reference
+    url_env: DESTINATION_TORQ_DEV_URL
+    token_env: DESTINATION_TORQ_DEV_TOKEN
 
   - name: torq_prod
     kind: torq
-    enabled: false              # enabled in prod env config
-    url_env: TORQ_PROD_URL
-    token_env: TORQ_PROD_TOKEN
+    enabled: true              # keep true; routing (default_routes), not this, gates prod
+    url_env: DESTINATION_TORQ_PROD_URL
+    token_env: DESTINATION_TORQ_PROD_TOKEN

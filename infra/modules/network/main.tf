@@ -32,7 +32,11 @@ resource "azurerm_subnet" "private_endpoints" {
 locals {
   zones = {
     eventhub = "privatelink.servicebus.windows.net"
-    redis    = "privatelink.redis.cache.windows.net"
+    # Azure Managed Redis (Microsoft.Cache/redisEnterprise) resolves under
+    # redis.azure.net — NOT the classic Azure Cache for Redis zone
+    # redis.cache.windows.net. Wrong zone = the private endpoint never resolves
+    # and the engine cannot reach Redis, with nothing failing at plan time.
+    redis    = "privatelink.redis.azure.net"
     keyvault = "privatelink.vaultcore.azure.net"
     blob     = "privatelink.blob.core.windows.net"
   }

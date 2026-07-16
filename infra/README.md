@@ -46,7 +46,7 @@ Both use **Managed Identity + Key Vault** (never passwords in files) and are ful
 | `identity` | One user-assigned Managed Identity | The single identity the engine uses to reach Event Hub, Redis, Blob, and Key Vault. |
 | `external_identity` | Nothing (mode = `managed_identity`, a passthrough) or a user-assigned Managed Identity + federated credential (mode = `federated`) | Generalizes how the two external actors (`log_sender`, `publisher`) authenticate — an Azure resource's own identity, or a Workload Identity Federation trust for software outside Azure. Instantiated twice from root `main.tf`. |
 | `storage` | Storage account with `checkpoints`, `bundle`, `detections` containers | `detections` holds published detection bundles; `bundle` is the Function App's own deploy package. The `publisher` identity may write `detections`. |
-| `eventhub` | Event Hubs namespace + the `logs-in` hub, sized from `config/sources.yaml` | Grants the engine's MI *receive* and the `log_sender` identity *send* — no access keys. |
+| `eventhub` | Event Hubs namespace + one hub per entry in `config/sources.yaml` (`palo-traffic-in`, `cloudflare-in`, `default-logs-in`), sized from that file | Grants the engine's MI *receive* and the `log_sender` identity *send* — no access keys. **The processor binds to a single hub (`eventhub_name` in `main.tf`); it must be one of these, and any hub with no consumer silently evaluates nothing.** See `terraform test`. |
 | `redis` | Azure Cache for Redis + a **data-plane access policy** for the engine's MI | That access policy is what lets the engine actually use Redis (Entra auth, no keys). Biggest single cost. |
 | `keyvault` | **Two** Key Vaults (the module is instantiated twice) | `module.keyvault` holds engine runtime secrets (Torq tokens, log-sender creds) - readable only by the processor MI. `module.ci_keyvault` holds CI-only secrets - readable only by the `publisher` identity. Two vaults, not one with two roles, so a compromised identity on one side can't read the other's secrets. |
 | `function_app` | The Flex Consumption Function App (the processor) + all its settings | Reads Event Hub/Redis/Key Vault/Blob **by identity**. Also carries `log_type_field`/`event_time_field`, the per-feed field-name mapping. |
@@ -58,13 +58,18 @@ Start at `main.tf` to see the whole system assembled from modules, then open any
 
 ## Deploy / change / destroy (quick reference — full steps in [PRODUCTION.md](../docs/PRODUCTION.md))
 
-One-time: bootstrap the remote state store (`infra/global/backend.tf.example`), and `cp envs/dev.tfvars.example envs/dev.tfvars` and fill it in. Then, from the repo root:
+One-time: `cp envs/dev.tfvars.example envs/dev.tfvars` and fill it in. State is
+**local by default** (a `terraform.tfstate` in `infra/`) — fine for a single
+instance/lab, nothing to bootstrap. For a shared/prod or multi-instance setup,
+uncomment the backend block in `infra/backend.tf` and bootstrap the remote store
+(`infra/global/backend.tf.example`), then add `-backend-config="key=<inst>.tfstate"`
+to `init`. From the repo root:
 
 ```bash
-terraform -chdir=infra init  -backend-config="key=dev.tfstate"   # once per instance
-terraform -chdir=infra plan    -var-file=envs/dev.tfvars         # preview (read this!)
-terraform -chdir=infra apply   -var-file=envs/dev.tfvars         # make it
-terraform -chdir=infra destroy -var-file=envs/dev.tfvars         # delete it (your off switch)
+terraform -chdir=infra init                              # local state; add -backend-config=... for remote
+terraform -chdir=infra plan    -var-file=envs/dev.tfvars # preview (read this!)
+terraform -chdir=infra apply   -var-file=envs/dev.tfvars # make it
+terraform -chdir=infra destroy -var-file=envs/dev.tfvars # delete it (your off switch)
 ```
 
 For prod, swap `dev` → `prod` everywhere. Or use the Makefile: `make apply ENV=dev` / `make apply ENV=prod` — same targets, `ENV` picks the instance.

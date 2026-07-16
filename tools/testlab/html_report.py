@@ -131,9 +131,9 @@ def render(meta: dict, captured: dict) -> str:
         signals,
         [
             lambda s: html.escape(str(s.get("detection_id", ""))),
-            lambda s: html.escape(str(s.get("p_log_type", ""))),
+            lambda s: html.escape(str(s.get("dataset", ""))),
             lambda s: html.escape(str(s.get("dedup", ""))),
-            lambda s: html.escape(str(s.get("p_event_time", ""))),
+            lambda s: html.escape(str(s.get("_time", ""))),
         ],
         "no detection matched any event in this run",
     )
@@ -152,7 +152,7 @@ def render(meta: dict, captured: dict) -> str:
         dispatched,
         [
             lambda d: _badge(d.get("severity")),
-            lambda d: html.escape(str(d.get("detection_id", ""))),
+            lambda d: html.escape(str(d.get("rule_id", ""))),
             lambda d: html.escape(str(d.get("title", ""))),
             lambda d: html.escape(str(d.get("alert_id", "")))[:8],
         ],

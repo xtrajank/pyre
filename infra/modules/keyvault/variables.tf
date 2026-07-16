@@ -19,6 +19,14 @@ variable "reader_principal_ids" {
     secrets.
   EOT
 }
+variable "purge_protection_enabled" {
+  type    = bool
+  default = true
+  # ON (prod): a soft-deleted vault CANNOT be purged for the retention window, so
+  # an attacker can't permanently destroy your secrets - but the NAME is locked
+  # for 90 days, which blocks rebuilding a dev instance under the same name_prefix.
+  # OFF (dev): a destroyed vault can be purged immediately and the name reused.
+}
 variable "tags" {
   type    = map(string)
   default = {}

@@ -1,13 +1,24 @@
 # Private storage: Event Hub checkpoints + deploy artifact bundle.
 resource "azurerm_storage_account" "sa" {
-  name                          = replace("${var.name_prefix}stor", "-", "")
-  location                      = var.location
-  resource_group_name           = var.resource_group_name
-  account_tier                  = "Standard"
-  account_replication_type      = "LRS"
-  min_tls_version               = "TLS1_2"
-  public_network_access_enabled = false # reached only via the private endpoint below
-  shared_access_key_enabled     = false # force Entra/Managed Identity (no access keys)
+  name                = replace("${var.name_prefix}stor", "-", "")
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  account_tier        = "Standard"
+  # Checkpoints and deploy/detection bundles are all reconstructible from Event
+  # Hubs and the DaC repo, so cross-region replication would be paid-for
+  # durability nothing here needs.
+  account_replication_type = "LRS"
+  min_tls_version          = "TLS1_2"
+  # Set explicitly rather than inherited. The provider currently defaults this
+  # to true, but a security control that holds only because of a provider
+  # default is one major version away from silently flipping - and it reads as
+  # unspecified to anyone auditing the config.
+  https_traffic_only_enabled = true
+  # Always private: reached only via the private endpoint, from inside the VNet.
+  # Entra-only (no access keys). Container creation / `pyre publish` run from a
+  # VNet-resident deployer.
+  public_network_access_enabled = false
+  shared_access_key_enabled     = false
   tags                          = var.tags
 }
 resource "azurerm_storage_container" "checkpoints" {
@@ -54,7 +65,10 @@ resource "azurerm_role_assignment" "blob_data" {
 # CI publisher (Azure Pipelines service connection) writes detection bundles + the pointer.
 # Scoped to the detections container only - least privilege vs. the whole account.
 resource "azurerm_role_assignment" "detections_publisher" {
-  count                = var.publisher_principal_id == "" ? 0 : 1
+  # Gated on a plan-time-known flag, not on the principal id itself: when the
+  # publisher is federated, its principal_id is created in this same apply and
+  # is therefore unknown at plan, which a count argument may not be.
+  count                = var.publisher_enabled ? 1 : 0
   scope                = azurerm_storage_container.detections.id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = var.publisher_principal_id

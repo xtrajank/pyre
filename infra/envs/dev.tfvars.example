@@ -1,76 +1,87 @@
-# dev INSTANCE of pyre. Copy to dev.tfvars and fill in. Same composition as prod,
-# just cheaper values. Deploy with:
-#   terraform -chdir=infra init  -backend-config="key=dev.tfstate"
+# ─────────────────────────────────────────────────────────────────────────────
+# dev / LAB INSTANCE of pyre. Copy to dev.tfvars and fill in the <...> values.
+# Same composition as prod — only the values differ (cheaper SKUs, lab access,
+# a mock-only destination). This is the file tools/LAB.md walks you through.
+#
+#   # bootstrap remote state once (tools/LAB.md Part 3), fill infra/backend.tf, then:
+#   terraform -chdir=infra init -backend-config="key=dev.tfstate"
 #   terraform -chdir=infra apply -var-file=envs/dev.tfvars
-# (or: make apply ENV=dev)
+#
+# Deploys the SAME secure architecture as prod (all private, Entra-only), just
+# cheaper SKUs. Two explicit choices keep it off production — NEITHER depends on
+# `env`:
+#   1. default_routes = ["mock"]  — alerts can only ever reach the mock sink
+#   2. no production destination is declared at all
+# Everything is fully private (no public endpoints, no IP allowlist); deploy from
+# inside the VNet. See tools/PRODUCTION_CHECKLIST.md section 1.
+# ─────────────────────────────────────────────────────────────────────────────
 
-name_prefix         = "pyredev" # must be globally unique across ALL instances
+name_prefix         = "pyredev" # globally unique across ALL instances (storage/KV/EH names)
 env                 = "dev"
-location            = "eastus2"
+location            = "westus2"
 resource_group_name = "rg-pyre-dev"
-cost_profile        = "test" # cheapest SKUs
-owner               = "secops"
+cost_profile        = "test"             # cheapest SKUs: Managed Redis Balanced_B0, 1 TU Event Hubs, Flex 0 always-ready
+owner               = "<your object id>" # az ad signed-in-user show --query id -o tsv
 
-# Keep each instance's network distinct so they can peer if ever needed:
+# Everything is always private, reached only from inside the VNet - there is no
+# IP allowlist. Run terraform/func/pyre/log-shipping from a VNet-resident agent.
+
+# --- Identities: YOU are both ------------------------------------------------
+# Grant the two external roles to your own user so your `az login` can act as the
+# log sender AND the bundle publisher. "managed_identity" mode just means "an
+# object ID that already exists" — here, yours.
+log_sender = { mode = "managed_identity", principal_id = "<your object id>" }
+publisher  = { mode = "managed_identity", principal_id = "<your object id>" }
+#
+# In a REAL dev instance (deployed from CI/an agent, not a laptop) these become
+# the shipper's and CI's identities instead. Four worked shapes:
+#   A. shipper is an Azure resource (Cribl on a VM/VMSS/Container App):
+#      log_sender = { mode = "managed_identity", principal_id = "<that identity's object id>" }
+#   B. CI outside Azure (GitHub Actions — the temporary, non-prod path):
+#      publisher = { mode = "federated", federated_credentials = [{
+#        name = "github-main", issuer = "https://token.actions.githubusercontent.com",
+#        subject = "repo:<org>/<repo>:ref:refs/heads/main" }] }
+#   C. CI on a self-hosted ADO agent that IS Azure compute (the prod path):
+#      publisher = { mode = "managed_identity", principal_id = "<agent VM's identity object id>" }
+#   D. CI on ADO Microsoft-hosted agents (needs a federated WIF service connection):
+#      publisher = { mode = "federated", federated_credentials = [{
+#        name = "ado-pyre-publisher", issuer = "<issuer ADO shows>", subject = "<subject ADO shows>" }] }
+
+# --- Network (distinct per instance so they can peer later) ------------------
 address_space           = "10.0.0.0/16"
 pe_subnet_prefix        = "10.0.1.0/24"
 functions_subnet_prefix = "10.0.2.0/24"
 
-# Batch <-> single-event: 256 = batched (default). Set 1 for single-event
-# (one invocation per log) on a low-volume, latency-critical instance.
-# max_event_batch_size = 256
+# --- Who may change this instance --------------------------------------------
+# Your own object id, so you can run terraform apply here. In the company, list a
+# group id and add people to the group (no terraform run). Empty grants nobody.
+#   az ad signed-in-user show --query id -o tsv
+admin_principal_ids = ["<your object id>"]
 
-# Event/log field names your feed actually uses (defaults match Cribl's own
-# field names, not Panther's p_ prefix - override if yours differ):
-# log_type_field   = "dataset"     # e.g. "p_log_type" for a Panther-style feed
-# event_time_field = "_time"       # e.g. "p_event_time" for a Panther-style feed
+# --- Engine tuning: minimal for a single low-volume feed ---------------------
+worker_process_count = 1 # one bundle copy in the 2 GB instance; raise for real volume
+threads_per_worker   = 1 # a single-user lab needs no I/O overlap
+# Feed shape (log-type field, event-time field, envelope) is declared PER
+# NAMESPACE in config/sources.yaml, not here. The default `cribl` namespace is
+# already dataset / _time / no-envelope - what testlab samples stamp.
 
-# External identities to trust - each is EITHER an Azure resource (use its own
-# Managed Identity) OR software outside Azure (use Workload Identity
-# Federation; Terraform provisions the trust, no client secret ever stored).
-# Leave unset to skip granting access until you know which shape applies.
+# --- Alert destinations: the mock is the ONLY sink ---------------------------
+# The mock Function App (<name_prefix>-mockdest) does not exist until LAB.md
+# Part 6. This URL is its DERIVED name, so it is correct the moment you deploy
+# the mock — but you MUST restart the processor after first setting it, because
+# destinations are read at STARTUP (only detections hot-reload):
+#   az functionapp restart -n <name_prefix>-proc -g <resource_group_name>
+# No token_secret: a mock needs no auth, so no Key Vault secret is created.
+destinations = {
+  mock = { url = "https://pyredev-mockdest.azurewebsites.net/api/alert" }
+}
 
-# Example A: your log shipper runs as an Azure resource with its own identity
-# (e.g. Cribl deployed on an Azure VM/VMSS/Container App):
-# log_sender = {
-#   mode         = "managed_identity"
-#   principal_id = "<object-id-of-that-identity>"
-# }
-# Example B: your CI runs outside Azure (GitHub Actions - typical for local/
-# test pipelines; this is the temporary, non-production path):
-# publisher = {
-#   mode = "federated"
-#   federated_credentials = [{
-#     name    = "github-main"
-#     issuer  = "https://token.actions.githubusercontent.com"
-#     subject = "repo:<org>/<repo>:ref:refs/heads/main"
-#   }]
-# }
-# Example C: your CI runs on a self-hosted ADO agent that IS an Azure resource
-# (a VM/VMSS with its own Managed Identity) - the production path, no
-# federation setup needed at all:
-# publisher = {
-#   mode         = "managed_identity"
-#   principal_id = "<object-id-of-the-agent-VM's-managed-identity>"
-# }
-# Example D: your CI runs on ADO Microsoft-hosted agents (no Azure identity to
-# attach) - also production, but needs a federated trust instead. Create an
-# ADO "workload identity federation" service connection first (Project
-# Settings -> Service connections -> New -> Azure Resource Manager ->
-# Workload identity federation -> manual), which shows you the issuer/subject
-# to put here:
-# publisher = {
-#   mode = "federated"
-#   federated_credentials = [{
-#     name    = "ado-pyre-publisher"
-#     issuer  = "<issuer-ADO-shows-you>"
-#     subject = "<subject-ADO-shows-you>"
-#   }]
-# }
+# Where an alert goes when its detection names no destination itself. THIS — not
+# `env`, not destinations.yaml's `enabled:` — is what keeps a lab off production.
+# This instance declares NO production destination above, so even a typo here
+# cannot page prod: the adapter would have no URL/token and fail closed and loud.
+default_routes = ["mock"]
+
+# signals_sink_url is intentionally unset in a lab: no Cribl lake, so signals are
+# discarded and only alerts reach the mock (expected — see LAB.md §9).
 # signals_sink_url = "https://<cribl-http-source>"
-
-# Torq destinations (config/destinations.yaml). URLs only - the tokens
-# (torq-dev-token / torq-prod-token) go in Key Vault, not here:
-#   az keyvault secret set --vault-name <name_prefix>-kv --name torq-dev-token --value <token>
-# torq_dev_url  = "https://<torq-webhook-dev>"
-# torq_prod_url = "https://<torq-webhook-prod>"

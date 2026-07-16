@@ -40,9 +40,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # MUST match infra/modules/function_app's runtime_version: `pyre deps` below
+      # is only truthful if this interpreter matches the one the engine runs on.
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: pip install pyyaml azure-identity azure-storage-blob
+      # engine/requirements.txt (not just the CLI's own deps) so `pyre deps` checks
+      # the bundle against the same package set the deployed engine has.
+      - run: pip install -r engine/requirements.txt azure-storage-blob
 
       # Pull the DaC repo at the pinned ref. DAC_TOKEN scopes to a private repo;
       # omit for a public one. DAC_REF lets a repository_dispatch pin the exact sha.
@@ -54,6 +58,13 @@ jobs:
           ./cli/pyre pull
           ./cli/pyre validate
           ./cli/pyre build
+
+      # The gate for the hot-reload-vs-deploy split. Detections reload in ~45s;
+      # engine/requirements.txt is only installed on DEPLOY. Without this, a DaC
+      # push that adds an import publishes fine and the detection then silently
+      # fails to load on every worker. Fail here instead - loudly, before publish.
+      - name: check bundle imports resolve against engine/requirements.txt
+        run: ./cli/pyre deps
 
       # OIDC login - the SP behind these must hold the detections-container role
       # (Terraform: publisher_principal_id).

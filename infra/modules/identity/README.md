@@ -1,3 +1,3 @@
 # module: identity
 
-Single-concern Terraform module. Private by default (public network access disabled), Managed-Identity/RBAC auth, no static keys. Consumed by env compositions in ../../envs/. Replaceable in isolation; outputs are the only coupling.
+The processor's user-assigned Managed Identity. Every service role assignment targets its principal_id; the app authenticates as it, with no stored secret.

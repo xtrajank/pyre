@@ -5,3 +5,16 @@ azure-storage-blob
 redis>=5.0
 pyyaml
 requests
+
+# Third-party imports the DaC DETECTIONS themselves make (panther-analysis
+# parity). The engine execs detection modules in-process, so these have to be in
+# the engine's environment or those detections fail to import and get skipped -
+# silently reducing coverage. Keep in sync with the DaC repo's own requirements;
+# `pyre validate` and the registry's "skipping detection ..." warnings are how a
+# newly-introduced import shows up.
+panther_core                 # PantherEvent, ImmutableCaseInsensitiveDict, ImmutableList
+panther_detection_helpers    # get_string_set/put_string_set (Panther's rule-state cache)
+python-dateutil              # dateutil.parser in time-window rules
+policyuniverse               # AWS IAM policy/action parsing
+pycountry                    # country-code lookups in geo rules
+boto3                        # botocore/boto3 types in some AWS helpers

@@ -1,3 +1,3 @@
 # module: eventhub
 
-Single-concern Terraform module. Private by default (public network access disabled), Managed-Identity/RBAC auth, no static keys. Consumed by env compositions in ../../envs/. Replaceable in isolation; outputs are the only coupling.
+Event Hubs namespaces and hubs, from config/sources.yaml. Private endpoints, Entra-only (no SAS), RBAC receive/send. Creates namespaces; existing ones are bound in infra/main.tf.

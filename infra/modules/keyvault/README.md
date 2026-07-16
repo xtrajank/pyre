@@ -1,3 +1,3 @@
 # module: keyvault
 
-Single-concern Terraform module. Private by default (public network access disabled), Managed-Identity/RBAC auth, no static keys. Consumed by env compositions in ../../envs/. Replaceable in isolation; outputs are the only coupling.
+A Key Vault: RBAC (not access policies), private endpoint, purge protection. Instantiated twice in infra/main.tf - engine-runtime secrets and CI-only secrets - with disjoint readers.

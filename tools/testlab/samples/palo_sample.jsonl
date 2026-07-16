@@ -1,4 +1,4 @@
-{"p_log_type":"Palo.Traffic","p_event_time":"2026-07-13T10:00:00Z","action":"allow","src_ip":"10.1.1.5","dst_ip":"203.0.113.9","dport":3389,"app":"ms-rdp"}
-{"p_log_type":"Palo.Traffic","p_event_time":"2026-07-13T10:00:01Z","action":"allow","src_ip":"10.1.1.5","dst_ip":"203.0.113.9","dport":3389,"app":"ms-rdp"}
-{"p_log_type":"Palo.Traffic","p_event_time":"2026-07-13T10:00:02Z","action":"allow","src_ip":"10.1.1.9","dst_ip":"8.8.8.8","dport":443,"app":"ssl"}
-{"p_log_type":"Palo.Traffic","p_event_time":"2026-07-13T10:00:03Z","action":"deny","src_ip":"10.1.1.9","dst_ip":"203.0.113.9","dport":23,"app":"telnet"}
+{"dataset": "SEC_Network_Palo_Alto_Traffic", "_time": "2026-07-13T10:00:00Z", "action": "allow", "src_ip": "10.1.1.5", "dst_ip": "203.0.113.9", "dport": 3389, "app": "ms-rdp"}
+{"dataset": "SEC_Network_Palo_Alto_Traffic", "_time": "2026-07-13T10:00:01Z", "action": "allow", "src_ip": "10.1.1.5", "dst_ip": "203.0.113.9", "dport": 3389, "app": "ms-rdp"}
+{"dataset": "SEC_Network_Palo_Alto_Traffic", "_time": "2026-07-13T10:00:02Z", "action": "allow", "src_ip": "10.1.1.9", "dst_ip": "8.8.8.8", "dport": 443, "app": "ssl"}
+{"dataset": "SEC_Network_Palo_Alto_Traffic", "_time": "2026-07-13T10:00:03Z", "action": "deny", "src_ip": "10.1.1.9", "dst_ip": "203.0.113.9", "dport": 23, "app": "telnet"}

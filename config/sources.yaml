@@ -1,24 +1,56 @@
-# Declarative log sources. IaC reads this to size Event Hubs; the engine reads
-# the configured log-type field (Terraform var log_type_field, default
-# "dataset") off each event at runtime. Add a source = add an entry here.
-# Give high-volume sources their own hub + more partitions to isolate scaling.
+# Log sources, grouped by Event Hub NAMESPACE. One namespace = one feed with one
+# SHAPE. Terraform sizes the hubs; the engine consumes EVERY hub across EVERY
+# namespace, each read with its namespace's shape. Add/remove a namespace, a hub,
+# or a log_type by editing here - nothing else changes.
+#
+# create: true   Terraform creates this namespace and its hubs.
+# create: false  Bind a namespace that ALREADY exists (e.g. Azure diagnostics
+#                already landing in an Event Hub). Set existing_name +
+#                existing_resource_group; Terraform grants the processor Receive
+#                on it and creates nothing. The processor's VNet must be able to
+#                reach it (its private endpoint or a peering) - see docs.
+#
+# shape: how the engine reads events on this namespace's hubs.
+#   log_type_field   - value picks which detections run   (Cribl: dataset)
+#   event_time_field - the event's own timestamp          (Cribl: _time)
+#   envelope         - key holding an array of records in one message
+#                      (Azure diagnostics: records); "" = one message, one event.
+#
+# Give a high-volume source its own hub (more partitions = higher parallelism
+# ceiling); send everything else to the one hub marked `default: true` (the
+# per-feed catch-all). A hub is consumed identically whether dedicated or not -
+# a dedicated hub only buys isolation and its own parallelism ceiling.
 
-sources:
-  - name: palo_traffic
-    log_types: [SEC_Network_Palo_Alto_Traffic]
-    hub: palo-traffic-in            # dedicated hub: isolates Palo's firehose
-    partitions: 32                  # parallelism ceiling for this source
-    retention_hours: 24
+namespaces:
+  - name: cribl
+    create: true
+    shape: { log_type_field: dataset, event_time_field: _time, envelope: "" }
+    hubs:
+      - name: palo-traffic-in          # dedicated: isolates Palo's firehose
+        log_types: [SEC_Network_Palo_Alto_Traffic]
+        partitions: 32
+        retention_hours: 24
+      - name: cloudflare-in
+        log_types: [SEC_Web_Cloudflare]
+        partitions: 16
+        retention_hours: 24
+      - name: default-logs-in          # catch-all: the long tail, fewest partitions
+        default: true
+        log_types: [ICO.Network]
+        partitions: 4
+        retention_hours: 24
 
-  - name: cloudflare
-    log_types: [SEC_Web_Cloudflare]
-    hub: cloudflare-in
-    partitions: 16
-    retention_hours: 24
-
-  # Everything lower-volume can share one hub.
-  - name: shared_default
-    log_types: [SEC_XDR_AgentsInfo, SEC_Auth_Entra_Signin]
-    hub: default-logs-in
-    partitions: 8
-    retention_hours: 24
+  # Azure-native diagnostics (Defender XDR, Entra sign-ins) that never leave the
+  # tenant. They already land in an Event Hub, so we BIND it rather than create.
+  # Uncomment and fill in for the company env; the personal test env omits this.
+  # - name: azure
+  #   create: false
+  #   existing_name: sec-azure-diagnostics
+  #   existing_resource_group: rg-security-logs
+  #   shape: { log_type_field: category, event_time_field: time, envelope: records }
+  #   hubs:
+  #     - name: azure-diag-in
+  #       default: true
+  #       log_types: [SEC_XDR_AgentsInfo, SEC_Auth_Entra_Signin]
+  #       partitions: 8
+  #       retention_hours: 24

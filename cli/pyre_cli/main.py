@@ -1,9 +1,9 @@
 """pyre CLI: manage detections and deployment from the DaC repo.
 
-The unit you enable/disable is a DETECTION, not infrastructure. "disable" flips
-a flag (App Configuration) that the engine reads with a short cache, so it takes
-effect in seconds with no redeploy. "deploy" publishes the Function App and the
-detection bundle. Infra itself is managed by Terraform (see infra/), not here.
+Disable a detection by setting `Enabled: false` in its .yml and running
+`pyre publish` - the engine drops a disabled detection at load, live within
+refresh_interval_seconds, no redeploy. "deploy" publishes the Function App and
+the detection bundle. Infra itself is managed by Terraform (see infra/), not here.
 """
 import argparse
 from . import commands
@@ -15,7 +15,15 @@ def main(argv):
 
     sub.add_parser("pull", help="clone the external DaC repo (config/detections.yaml) into the local bundle")
 
-    sub.add_parser("validate", help="lint YAML, check LogTypes + Filename resolve")
+    v = sub.add_parser("validate", help="lint YAML, check LogTypes + Filename resolve")
+    v.add_argument("--show-default-routed", action="store_true",
+                   help="list the log types that have no dedicated hub and will route to "
+                        "the catch-all (config/sources.yaml `default: true`)")
+
+    dp = sub.add_parser("deps", help="check every import in the bundle resolves in THIS "
+                                     "environment (run with engine/requirements.txt installed)")
+    dp.add_argument("--show", type=int, default=5, metavar="N",
+                    help="max files to list per missing module (default 5)")
 
     t = sub.add_parser("test", help="run detection unit tests")
     t.add_argument("detection_id", nargs="?", default=None)
@@ -28,14 +36,6 @@ def main(argv):
 
     d = sub.add_parser("deploy", help="publish Function App + upload detection bundle")
     d.add_argument("--env", required=True)
-
-    for name in ("enable", "disable"):
-        s = sub.add_parser(name, help=f"{name} a detection at runtime (App Config flag)")
-        s.add_argument("detection_id")
-        s.add_argument("--env", required=True)
-
-    st = sub.add_parser("status", help="show which detections are live per env")
-    st.add_argument("--env", required=True)
 
     args = p.parse_args(argv)
     return getattr(commands, args.cmd)(args)

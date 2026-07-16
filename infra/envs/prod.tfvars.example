@@ -1,45 +1,78 @@
-# prod INSTANCE of pyre. Copy to prod.tfvars and fill in. Identical composition to
-# dev — only the values differ (bigger SKUs, its own network + state). Deploy with:
+# ─────────────────────────────────────────────────────────────────────────────
+# prod INSTANCE of pyre. Copy to prod.tfvars and fill in the <...> values.
+# Identical composition to dev — only the values differ (bigger SKUs, its own
+# network + state, a real destination, and NO public access).
+#
+#   # prod uses REMOTE state — uncomment the backend block in infra/backend.tf first
 #   terraform -chdir=infra init  -backend-config="key=prod.tfstate"
 #   terraform -chdir=infra apply -var-file=envs/prod.tfvars
-# (or: make apply ENV=prod)
+#
+# Deploy from an agent INSIDE the VNet (docs/PRODUCTION.md §10.1). A laptop
+# cannot reach a production instance — and that is the point.
+# ─────────────────────────────────────────────────────────────────────────────
 
-name_prefix         = "pyreprod" # globally unique; distinct from dev
+name_prefix         = "pyreprod" # globally unique; distinct from every other instance
 env                 = "prod"
 location            = "eastus2"
 resource_group_name = "rg-pyre-prod"
-cost_profile        = "scale" # Premium Redis, auto-inflating Event Hubs, Flex to 1000 instances
+cost_profile        = "scale" # bigger SKUs: Managed Redis Balanced_B5, auto-inflating Event Hubs, Flex to 1000 instances
 owner               = "secops"
 
-# Distinct network from dev so the two can peer:
+# Deployer access: everything is always private. You deploy from inside the VNet
+# (a build agent on Azure compute, or a workstation on a peered network); RBAC
+# governs the deployer identity. If a step "can't reach" a resource, the fix is
+# VNet connectivity, never a public hole. There is no IP allowlist to set.
+
+# --- Who may change this instance --------------------------------------------
+# List an Entra GROUP object id; add/remove people by group membership, no
+# terraform run. Each principal gets Contributor + User Access Administrator on
+# the resource group. The first apply must be run by an Owner (bootstrap).
+admin_principal_ids = ["<secops-admins group object id>"]
+
+# --- Network: distinct from every other instance so they can peer ------------
 address_space           = "10.1.0.0/16"
 pe_subnet_prefix        = "10.1.1.0/24"
 functions_subnet_prefix = "10.1.2.0/24"
 
-# Event Hubs scaling floor/ceiling for prod volume:
-throughput_units_floor = 2
-max_throughput_units   = 20
+# --- Event Hubs scaling floor/ceiling for prod volume ------------------------
+throughput_units_floor = 2  # guaranteed TUs (~1 MB/s in, 2 MB/s out each)
+max_throughput_units   = 20 # auto-inflate ceiling under sustained load
 
-# Batch <-> single-event ceiling. 256 = batched (recommended for prod volume;
-# it's a ceiling, not a wait, so it doesn't delay alerts). 1 = single-event.
-# max_event_batch_size = 256
+# --- Engine tuning -----------------------------------------------------------
+# Defaults (4 processes / 4 threads / 256 batch / 900s idempotency TTL) ARE the
+# tuned prod values; override only against load-test evidence. See variables.tf.
+# worker_process_count = 4
+# threads_per_worker   = 4
 
-# Event/log field names your feed actually uses (defaults match Cribl's own
-# field names, not Panther's p_ prefix - override if yours differ):
-# log_type_field   = "dataset"
-# event_time_field = "_time"
+# --- Identities (prod REQUIRES both) -----------------------------------------
+# Each is EITHER an Azure resource (its own Managed Identity) OR software outside
+# Azure (Workload Identity Federation — no stored secret ever). Prod usually
+# lands on shape C or D from envs/dev.tfvars.example:
+#   C. self-hosted ADO agent that IS Azure compute (no federation needed):
+log_sender = { mode = "managed_identity", principal_id = "<log shipper identity object id>" }
+publisher  = { mode = "managed_identity", principal_id = "<ADO agent identity object id>" }
+#   D. ADO Microsoft-hosted agents (needs a federated WIF service connection):
+# publisher = { mode = "federated", federated_credentials = [{
+#   name = "ado-pyre-publisher", issuer = "<issuer ADO shows>", subject = "<subject ADO shows>" }] }
 
-# Prod really wants these set - each is EITHER an Azure resource (its own
-# Managed Identity) OR software outside Azure (Workload Identity Federation).
-# See envs/dev.tfvars.example for the four worked examples (A-D); prod
-# typically lands on C (self-hosted ADO agent on Azure compute - no
-# federation setup at all) or D (ADO Microsoft-hosted agents):
-# log_sender = { mode = "managed_identity", principal_id = "<object-id-of-the-log-sender's-identity>" }
-# publisher  = { mode = "managed_identity", principal_id = "<object-id-of-the-ADO-agent's-managed-identity>" }
-# signals_sink_url = "https://<cribl-http-source>"
+# Signal/alert write-back for the audit trail (your Cribl HTTP source / lake).
+# Unlike a lab, prod MUST set this: empty means the entire signal audit trail
+# goes nowhere. See tools/PRODUCTION_CHECKLIST.md §6.
+signals_sink_url = "https://<cribl-http-source>"
 
-# Torq destinations (config/destinations.yaml). URLs only - the tokens
-# (torq-dev-token / torq-prod-token) go in Key Vault, not here:
+# --- Alert destinations ------------------------------------------------------
+# `kind` (torq / webhook / mock) is declared in config/destinations.yaml — nothing
+# here is tool-specific, so moving off Torq is a `kind` change there + a value here.
+#
+# token_secret is the SECRET NAME in the ENGINE's Key Vault (<name_prefix>-kv, NOT
+# the CI vault) — never the token itself. CREATE IT BEFORE `terraform apply`: an
+# unresolvable Key Vault reference fails auth at DISPATCH time, not at apply, so a
+# missing secret ships green and then silently drops every alert:
 #   az keyvault secret set --vault-name <name_prefix>-kv --name torq-prod-token --value <token>
-# torq_dev_url  = "https://<torq-webhook-dev>"
-# torq_prod_url = "https://<torq-webhook-prod>"
+destinations = {
+  torq_prod = { url = "https://<torq-webhook-prod>", token_secret = "torq-prod-token" }
+}
+
+# Alerts whose detection names no destination go here. Must name a destination
+# declared above; empty means such alerts are NOT delivered (loudly, at cold start).
+default_routes = ["torq_prod"]

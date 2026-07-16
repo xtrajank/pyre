@@ -9,12 +9,47 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # MUST match infra/modules/function_app's runtime_version. `pyre deps`
+      # resolves the bundle's imports against THIS interpreter, so on any other
+      # version the gate is answering a question nobody asked.
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: pip install pyyaml pytest
+      # tests/requirements.txt pulls in engine/requirements.txt too: the tests
+      # exercise the real engine, and `pyre deps` below can only tell the truth
+      # about the bundle's imports if the engine's own deps are installed.
+      - run: pip install -r tests/requirements.txt
+
+      # Fetch the bundle FIRST. Without this every step below was a no-op that
+      # exited 1: .bundle/ is gitignored, so `validate` found no bundle at all
+      # and printed "no bundle. Run `pyre pull` first." on every single run.
+      # This job has never passed, which is why nothing it guards was caught.
+      # DAC_TOKEN is only needed for a private DaC repo.
+      - name: pull the DaC bundle
+        env:
+          DAC_TOKEN: ${{ secrets.DAC_TOKEN }}
+        run: ./cli/pyre pull
+
       - run: ./cli/pyre validate
+      # The hot-reload-vs-deploy gate: detections reload in ~45s, but
+      # engine/requirements.txt only installs on DEPLOY, so a DaC push that adds
+      # an import would go live into an interpreter that lacks it and the
+      # detection would silently stop covering. Fail here instead.
+      - run: ./cli/pyre deps
       - run: ./cli/pyre build
       - run: ./cli/pyre test
+
+  # The engine against a REAL Redis 6.0 (the version Azure Cache for Redis
+  # serves) on Python 3.11, plus the prod routing branch and the concurrency
+  # paths. fakeredis - which the `detections` job's tests use - accepts Redis
+  # 7.0 syntax that Azure rejects, so this is the job that can actually tell you
+  # dedup will work in Azure. See tools/sim/README.md.
+  sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f tools/sim/docker-compose.yml run --rm sim
+      - if: always()
+        run: docker compose -f tools/sim/docker-compose.yml down -v
 
   terraform:
     runs-on: ubuntu-latest
@@ -26,4 +61,10 @@ jobs:
           terraform -chdir=infra fmt -check -recursive
           terraform -chdir=infra init -backend=false
           terraform -chdir=infra validate
-          echo "terraform plan runs in the deploy workflow with cloud creds (OIDC)"
+      # A real plan of the whole graph against a MOCK provider: no subscription,
+      # no credentials, no cost. Catches what a plan read by eye does not - a
+      # greenfield plan regression, a SKU/cost change, a publicly-reachable
+      # resource, a shared-key auth path, an inlined secret, a trigger bound to a
+      # hub that does not exist, and a hub left with no consumer.
+      - name: plan + posture assertions (offline)
+        run: terraform -chdir=infra test

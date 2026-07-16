@@ -1,16 +1,13 @@
-# Remote Terraform state, ONE state file per instance. The state store is shared;
-# each instance gets its own state blob, chosen by `key` at init time. Bootstrap
-# the state storage once (see infra/global/backend.tf.example), then:
-#
-#   terraform -chdir=infra init -backend-config="key=<instance>.tfstate"
-#
-# e.g. key=dev.tfstate for the dev instance, key=prod.tfstate for prod.
+# Remote state: one storage account, one blob per instance (key set at init:
+# -backend-config="key=<instance>.tfstate"). Bootstrap the account once, out of
+# band - Terraform can't create the account that holds its own state. See the
+# guide / infra/global/backend.tf.example. For a throwaway single-instance lab,
+# comment this block out to fall back to local state.
 terraform {
   backend "azurerm" {
-    resource_group_name  = "rg-tfstate"
-    storage_account_name = "pyretfstate" # <- state storage account
+    resource_group_name  = "rg-pyre-dev"
+    storage_account_name = "pyretfstate5245" # globally unique; created once, out of band
     container_name       = "tfstate"
-    use_azuread_auth     = true # auth to the state store with your Entra login, no keys
-    # key is supplied per instance at `terraform init -backend-config="key=..."`
+    use_azuread_auth     = true # Entra auth to the state store, no account keys
   }
 }

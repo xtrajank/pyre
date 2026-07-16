@@ -1,40 +1,58 @@
-# Ingestion bus. Public network access disabled; reached via private endpoint.
-# One namespace, one or more hubs (from config/sources.yaml). Partitions =
-# parallelism ceiling for the consuming Function App.
+# Ingestion bus. One or more namespaces (from config/sources.yaml), each with one
+# or more hubs. Every namespace: public access off, reached via private endpoint,
+# Entra-only (no SAS). Partitions = the consuming Function App's parallelism ceiling.
 locals {
-  sku      = var.cost_profile == "scale" ? "Standard" : "Standard"
+  # Standard on both profiles: Basic supports neither private endpoints nor
+  # auto-inflate, which this design requires.
+  sku      = "Standard"
   capacity = var.cost_profile == "scale" ? var.throughput_units_scale : 1
+
+  # Flatten namespaces -> hubs into one "<ns>/<hub>" map for a single for_each.
+  ns_hubs = merge([for ns_name, ns in var.namespaces : {
+    for hub_name, h in ns.hubs : "${ns_name}/${hub_name}" => {
+      namespace  = ns_name, hub = hub_name
+      partitions = h.partitions, retention_hours = h.retention_hours
+    }
+  }]...)
+
+  # A representative created namespace for the uniform posture outputs below
+  # (all created namespaces share cost_profile and allowlist).
+  rep = values(azurerm_eventhub_namespace.ns)[0]
 }
 
 resource "azurerm_eventhub_namespace" "ns" {
-  name                          = "${var.name_prefix}-ehns"
-  location                      = var.location
-  resource_group_name           = var.resource_group_name
-  sku                           = local.sku
-  capacity                      = local.capacity
-  auto_inflate_enabled          = var.cost_profile == "scale"
-  maximum_throughput_units      = var.cost_profile == "scale" ? var.max_throughput_units : null
-  public_network_access_enabled = false # reached only via the private endpoint below
-  local_authentication_enabled  = false # force Entra/Managed Identity (no SAS keys)
+  for_each                 = var.namespaces
+  name                     = "${var.name_prefix}-${each.key}-ehns"
+  location                 = var.location
+  resource_group_name      = var.resource_group_name
+  sku                      = local.sku
+  capacity                 = local.capacity
+  auto_inflate_enabled     = var.cost_profile == "scale"
+  maximum_throughput_units = var.cost_profile == "scale" ? var.max_throughput_units : null
+  # Always private: reached only via the private endpoint below, from inside the
+  # VNet. Entra-only (no SAS). Deploy from a VNet-resident agent/VM.
+  public_network_access_enabled = false
+  local_authentication_enabled  = false
   tags                          = var.tags
 }
 
 resource "azurerm_eventhub" "hub" {
-  for_each          = var.hubs
-  name              = each.key
-  namespace_id      = azurerm_eventhub_namespace.ns.id
+  for_each          = local.ns_hubs
+  name              = each.value.hub
+  namespace_id      = azurerm_eventhub_namespace.ns[each.value.namespace].id
   partition_count   = each.value.partitions
-  message_retention = max(1, ceil(each.value.retention_hours / 24)) # config is in hours; this attribute is in days
+  message_retention = max(1, ceil(each.value.retention_hours / 24)) # config is hours; attribute is days
 }
 
 resource "azurerm_private_endpoint" "pe" {
-  name                = "${var.name_prefix}-ehns-pe"
+  for_each            = var.namespaces
+  name                = "${var.name_prefix}-${each.key}-ehns-pe"
   location            = var.location
   resource_group_name = var.resource_group_name
   subnet_id           = var.pe_subnet_id
   private_service_connection {
     name                           = "ehns"
-    private_connection_resource_id = azurerm_eventhub_namespace.ns.id
+    private_connection_resource_id = azurerm_eventhub_namespace.ns[each.key].id
     subresource_names              = ["namespace"]
     is_manual_connection           = false
   }
@@ -45,15 +63,16 @@ resource "azurerm_private_endpoint" "pe" {
   tags = var.tags
 }
 
-# RBAC: processor identity receives; the log sender's identity sends. No keys.
+# RBAC: the processor receives on every created namespace; the log sender sends.
 resource "azurerm_role_assignment" "receiver" {
-  scope                = azurerm_eventhub_namespace.ns.id
+  for_each             = var.namespaces
+  scope                = azurerm_eventhub_namespace.ns[each.key].id
   role_definition_name = "Azure Event Hubs Data Receiver"
   principal_id         = var.processor_principal_id
 }
 resource "azurerm_role_assignment" "sender" {
-  count                = var.sender_principal_id == "" ? 0 : 1
-  scope                = azurerm_eventhub_namespace.ns.id
+  for_each             = var.sender_enabled ? var.namespaces : {}
+  scope                = azurerm_eventhub_namespace.ns[each.key].id
   role_definition_name = "Azure Event Hubs Data Sender"
   principal_id         = var.sender_principal_id
 }
