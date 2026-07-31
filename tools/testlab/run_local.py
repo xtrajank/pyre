@@ -25,9 +25,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "engine"))
 
-# SignalWriter posts signals AND alert records to the SAME Cribl sink (the lake
-# write-back from architecture Part 9), tagged by `_dataset`; the dispatcher posts
-# the delivered alert separately to the destination. We split them back out here.
+# The record sink posts signals AND alerts to the same endpoint, each tagged with
+# `p_record_type`; the dispatcher posts delivered alerts separately to their
+# destination. We split them back out here.
 CAPTURED = {"signals": [], "alert_records": [], "dispatched": []}
 
 
@@ -35,9 +35,9 @@ class _Sink(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(n) or "null")
-        if self.path.endswith("/signals"):        # SignalWriter batch (signals + alert records)
+        if self.path.endswith("/signals"):        # record-sink batch
             for rec in (body if isinstance(body, list) else [body]):
-                bucket = "alert_records" if rec.get("_dataset") == "pyre_alerts" else "signals"
+                bucket = "alert_records" if rec.get("p_record_type") == "alert" else "signals"
                 CAPTURED[bucket].append(rec)
         else:                                      # dispatcher -> the destination (mock)
             CAPTURED["dispatched"].append(body)
@@ -62,6 +62,15 @@ def main():
     ap.add_argument("--html", default=None,
                     help="also write a self-contained HTML report (stat tiles + "
                          "signal/alert/dispatch tables) to this path")
+    # The two knobs that have to match YOUR data. Same meaning as the
+    # LOG_TYPE_FIELD / EVENT_ENVELOPE_FIELD app settings in Azure - exposed as
+    # flags so testing a real bundle against real logs is one command.
+    ap.add_argument("--log-type-field", default=None,
+                    help="field that selects detections (default: dataset). Azure "
+                         "diagnostic logs usually use the record's category.")
+    ap.add_argument("--envelope-field", default=None,
+                    help="field holding an array of records when one message carries "
+                         "many (default: records). Pass '' to disable.")
     args = ap.parse_args()
 
     port = _start_sink()
@@ -73,20 +82,30 @@ def main():
         SIGNALS_SINK_URL=f"http://127.0.0.1:{port}/signals",
         MOCK_DEST_URL=f"http://127.0.0.1:{port}/alert",
         DESTINATIONS_PATH=os.path.join(REPO, "config", "destinations.yaml"),
+        # Destinations are explicit everywhere - no hidden per-env default.
+        DEFAULT_ROUTES="mock",
     )
+    if args.log_type_field is not None:
+        os.environ["LOG_TYPE_FIELD"] = args.log_type_field
+    if args.envelope_field is not None:
+        os.environ["EVENT_ENVELOPE_FIELD"] = args.envelope_field
 
     import fakeredis
     from pyre_engine.config import load_runtime_config
-    from pyre_engine.dedup import StateStore
     from pyre_engine.processor import Processor
+    from pyre_engine.state import StateStore
 
     cfg = load_runtime_config()
-    state = StateStore("", 0, use_entra=False, client=fakeredis.FakeStrictRedis(decode_responses=True))
+    # fakeredis exercises the REAL Redis code path locally - the same StateStore
+    # semantics production uses, without a server.
+    state = StateStore(fakeredis.FakeStrictRedis(decode_responses=True))
     proc = Processor(cfg, state=state)
 
     events = [ln.strip() for ln in open(args.file, encoding="utf-8") if ln.strip()]
     print(f"bundle : {os.path.relpath(args.bundle, REPO)}")
-    print(f"events : {len(events)} from {os.path.relpath(args.file, REPO)}\n")
+    print(f"routing: {cfg.log_type_field!r} -> "
+          f"{sorted(proc.loader.get().stats()['log_types']) or 'NO DETECTIONS LOADED'}")
+    print(f"events : {len(events)} message(s) from {os.path.relpath(args.file, REPO)}\n")
 
     proc.process_batch(events)
 

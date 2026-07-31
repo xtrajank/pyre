@@ -5,11 +5,15 @@ in production. The full walkthrough is **[docs/poc/README.md](../../docs/poc/REA
 
 | Path | What it is |
 |---|---|
-| `dac/` | A small, self-contained detection bundle (3 AWS CloudTrail rules + 1 global helper). Guarantees a green demo without depending on anything external. |
-| `samples/cloudtrail_poc.jsonl` | 10 CloudTrail events designed so 8 match a rule but only 3 raise an alert — that gap is the demo. |
-| `publish_bundle.py` | Zip a detections directory → upload to Blob → flip the pointer. The POC version of `pyre publish` (publishes an unversioned directory too). |
-| `package_function.py` | Build `dist/pyre-poc.zip` with Linux dependencies vendored in, for uploading the function by hand. |
-| `read_output.py` | Print what the engine appended to the output container. The "did it work?" check. |
+| **`dac_bundler/`** | **Drop this folder into your own DaC repo.** Turns it into the two blobs the engine reads, validating first. Has its own [README](dac_bundler/README.md). |
+| `dac/` | A throwaway self-contained bundle (3 AWS CloudTrail rules + 1 global helper), for proving the plumbing before your own detections are involved. |
+| `samples/cloudtrail_poc.jsonl` | 10 flat events for that bundle: 8 match a rule, 3 raise an alert. |
+| `samples/eventhub_diagnostic.jsonl` | 3 Azure Event Hubs `RuntimeAuditLogs` messages in the real `{"records":[...]}` envelope — 7 records total. Use these to check envelope unwrapping. |
+| `publish_bundle.py` | Package a detections directory into the two blobs the engine reads. Writes them to `dist/detections/` for a portal upload by default; `--account-url` uploads them directly if you have credentials. |
+| `package_function.py` | Build `dist/pyre-poc.zip` with **Linux** dependencies vendored in, so the function can be uploaded by hand with no build step on the Azure side. |
+| `read_output.py` | Print what the engine appended to the output container. Needs `az login`; without it, read the blobs in the portal instead. |
+
+Both build scripts need only Python — no Azure CLI, no Core Tools.
 
 ## The bundle in `dac/`
 
@@ -33,5 +37,14 @@ expected output ever drifts from reality, the test suite fails.
 ## Try it with no Azure at all
 
 ```bash
+# the throwaway bundle, flat events
 python tools/testlab/run_local.py --bundle tools/poc/dac --file tools/poc/samples/cloudtrail_poc.jsonl
+
+# the Azure shape: enveloped records, routed on a different field
+python tools/testlab/run_local.py --bundle tools/poc/dac_bundler/example \
+  --file tools/poc/samples/eventhub_diagnostic.jsonl --log-type-field Category
 ```
+
+The second is the one that matches the POC's real data: 3 messages carrying 7
+records → 4 signals → 1 alert. Point `--bundle` at your own repo to test your
+own detections the same way.

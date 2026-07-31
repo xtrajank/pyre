@@ -1,0 +1,28 @@
+# A worked example of the file pair the bundler expects. Copy this shape into
+# your own repo; this folder is never bundled (the bundler excludes itself).
+#
+# The .py named by Filename MUST sit in this same folder.
+AnalysisType: rule
+Filename: eventhub_auth_failure.py
+RuleID: "Azure.EventHub.AuthFailure"
+DisplayName: "Repeated Event Hub Authorization Failures"
+Enabled: true
+Severity: Medium
+
+# THE FIELD THAT MATTERS. Whatever your engine's LOG_TYPE_FIELD names on the
+# incoming record must equal one of these strings EXACTLY. For Azure diagnostic
+# logs streamed to Event Hubs that field is usually the record's category - so
+# confirm the exact spelling and casing your records carry before relying on it.
+LogTypes:
+  - RuntimeAuditLogs
+
+Threshold: 3
+DedupPeriodMinutes: 60
+Description: Three or more failed Event Hubs authorization attempts from one client.
+Runbook: >
+  Check whether the client IP and identity are expected senders/receivers for
+  this namespace. Repeated failures usually mean a stale SAS key or an identity
+  that lost its role assignment - but they also look exactly like probing.
+Tags:
+  - Azure
+  - EventHub

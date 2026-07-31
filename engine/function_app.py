@@ -5,10 +5,12 @@ lives in the reusable `pyre_engine` package so the same code can be reused by
 the (future) scheduled-query module and by a Container Apps host without
 modification.
 
-Four functions, and no more than four:
+Four kinds of function, and no more:
 
-  detect            Event Hub batch trigger. THE function - everything else is
-                    scaffolding around it.
+  detect            Event Hub batch trigger - one per configured hub. THE
+                    function; everything else is scaffolding around it. The hub
+                    list is config (see pyre_engine.config.event_hub_names), so
+                    going from one hub to twenty is a settings change.
   health            GET. Which bundle is loaded, how many detections, which log
                     types they cover, which field routes. The first thing to
                     check when a demo produces no alerts.
@@ -24,7 +26,7 @@ import logging
 
 import azure.functions as func
 
-from pyre_engine.config import load_runtime_config
+from pyre_engine.config import event_hub_names, load_runtime_config
 from pyre_engine.processor import Processor
 
 log = logging.getLogger("pyre.host")
@@ -34,17 +36,12 @@ app = func.FunctionApp()
 # Built once per worker process (cold start), reused across invocations.
 _config = load_runtime_config()
 _processor = Processor(_config)
+_HUBS = event_hub_names(_config)
 
 
-@app.function_name(name="detect")
-@app.event_hub_message_trigger(
-    arg_name="events",
-    event_hub_name="%EVENTHUB_NAME%",          # from app settings, e.g. "logs-in"
-    connection="EVENTHUB_CONNECTION",           # connection string or Managed-Identity settings
-    cardinality=func.Cardinality.MANY,          # deliver a BATCH, not one event
-)
-def detect(events: list[func.EventHubEvent]) -> None:
-    """One invocation handles a whole batch. Cost lever: batch size in host.json."""
+def _handle(events: list[func.EventHubEvent]) -> None:
+    """The whole Event Hub path, shared by every hub's trigger. One invocation
+    handles a whole batch. Cost lever: batch size in host.json."""
     raw = [e.get_body().decode("utf-8") for e in events]
     # partition_key + sequence_number is stable across an Event Hubs redelivery
     # (a checkpoint retry redelivers the same messages), so it's what the
@@ -52,6 +49,42 @@ def detect(events: list[func.EventHubEvent]) -> None:
     # (inside process_batch) if a given event lacks one.
     event_ids = [f"{e.partition_key}:{e.sequence_number}" for e in events]
     _processor.process_batch(raw, event_ids=event_ids)
+
+
+def _register_hub_trigger(hub: str, index: int) -> None:
+    """Attach one batch trigger to one hub.
+
+    Registering in a loop rather than writing N copies of the same decorated
+    function is what makes "add a log source" a config change: list the hub in
+    config/sources.yaml (or EVENTHUB_NAMES) and a trigger appears for it, with no
+    edit here. All of them funnel into the same `_handle`, so every hub gets
+    identical processing.
+    """
+    # A stable, unique function name per hub - Azure keys checkpoints and metrics
+    # on it, so it must not shift between deploys. The index keeps it unique if
+    # two hub names normalise to the same string.
+    safe = "".join(c if c.isalnum() else "_" for c in hub)
+    name = f"detect_{safe}" if len(_HUBS) > 1 else "detect"
+
+    @app.function_name(name=name)
+    @app.event_hub_message_trigger(
+        arg_name="events",
+        event_hub_name=hub,
+        connection="EVENTHUB_CONNECTION",       # connection string or Managed-Identity settings
+        cardinality=func.Cardinality.MANY,      # deliver a BATCH, not one event
+    )
+    def _trigger(events: list[func.EventHubEvent]) -> None:
+        _handle(events)
+
+    return _trigger
+
+
+for _i, _hub in enumerate(_HUBS):
+    _register_hub_trigger(_hub, _i)
+
+if not _HUBS:
+    log.error("no Event Hub configured: set EVENTHUB_NAME, or EVENTHUB_NAMES, or list "
+              "hubs in config/sources.yaml. The HTTP functions still work.")
 
 
 @app.function_name(name="health")
@@ -66,6 +99,7 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
         "state_backend": _config.state_backend,
         "log_type_field": _config.log_type_field,
         "event_time_field": _config.event_time_field,
+        "event_envelope_field": _config.event_envelope_field or None,
         "bundle_mode": _config.dac.bundle_mode,
         "output_container": _config.output_blob_container if _config.output_blob_account_url else None,
         "default_routes": _config.default_routes,

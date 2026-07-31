@@ -1,4 +1,4 @@
-# pyre POC — complete setup guide
+# pyre POC — setup guide (Azure Portal)
 
 The goal of this POC is narrow and worth stating precisely:
 
@@ -8,9 +8,29 @@ The goal of this POC is narrow and worth stating precisely:
 
 Everything that isn't needed for that sentence has been left out: no Redis, no
 Cribl, no Torq, no VNet, no Key Vault, no external communication of any kind.
-Alerts land in a blob you can open and read.
+Alerts land in a blob you can open and read in the portal.
 
-**Time to a working demo: about 45 minutes**, most of it waiting on deployments.
+## What you're doing, and what you're not
+
+The resources and the wiring between them **already exist** — your architect
+created them. Your job is five things:
+
+1. Create two blob containers
+2. Confirm what your log records actually look like
+3. Set the app settings that tell the engine how to behave
+4. Build the function zip locally and upload it
+5. Bundle your DaC repo and upload it
+
+**No Azure CLI and no Core Tools are needed anywhere in this guide.** Everything
+in Azure happens in the portal; everything local is plain Python. The only thing
+you run against Azure from your machine is an ordinary HTTPS request, using the
+function key you copy out of the portal.
+
+If something doesn't work, the wiring your architect set up is the first thing to
+rule out — **[troubleshooting.md](troubleshooting.md)** has a checklist for
+verifying every connection, so you can confirm nothing was missed.
+
+**Time: about 30 minutes.**
 
 ---
 
@@ -19,21 +39,21 @@ Alerts land in a blob you can open and read.
 1. [What you're building](#1-what-youre-building)
 2. [What changed in the code, and why](#2-what-changed-in-the-code-and-why)
 3. [Before you start](#3-before-you-start)
-4. [Step 1 — collect your resource names](#step-1--collect-your-resource-names)
-5. [Step 2 — create the two blob containers](#step-2--create-the-two-blob-containers)
-6. [Step 3 — give the Function App permission](#step-3--give-the-function-app-permission)
-7. [Step 4 — app settings](#step-4--app-settings)
-8. [Step 5 — deploy the function code](#step-5--deploy-the-function-code)
-9. [Step 6 — publish the detections](#step-6--publish-the-detections)
-10. [Step 7 — prove it works](#step-7--prove-it-works)
-11. [Step 8 — the real path: through the Event Hub](#step-8--the-real-path-through-the-event-hub)
-12. [Optional — Event Grid for instant detection reload](#optional--event-grid-for-instant-detection-reload)
-13. [Optional — a pipeline that publishes the DaC](#optional--a-pipeline-that-publishes-the-dac)
-14. [Demo script](#14-demo-script)
-15. [What this POC does not prove](#15-what-this-poc-does-not-prove)
-16. [App settings reference](#16-app-settings-reference)
+4. [Step 1 — create the two blob containers](#step-1--create-the-two-blob-containers)
+5. [Step 2 — find out what your logs actually look like](#step-2--find-out-what-your-logs-actually-look-like)
+6. [Step 3 — app settings](#step-3--app-settings)
+7. [Step 4 — build and upload the function](#step-4--build-and-upload-the-function)
+8. [Step 5 — bundle and upload your detections](#step-5--bundle-and-upload-your-detections)
+   - [**Exactly what the detections container must contain**](#exactly-what-the-detections-container-must-contain) ← the spec
+9. [Step 6 — prove it works](#step-6--prove-it-works)
+10. [Step 7 — the real path: through the Event Hub](#step-7--the-real-path-through-the-event-hub)
+11. [Changing a detection](#changing-a-detection)
+12. [Demo script](#demo-script)
+13. [What this POC does not prove](#what-this-poc-does-not-prove)
+14. [App settings reference](#app-settings-reference)
 
-Stuck? → **[troubleshooting.md](troubleshooting.md)**
+Going to production afterwards: **[to-production.md](to-production.md)** — the
+exact diff (spoiler: no engine code and no bundler code).
 
 ---
 
@@ -64,15 +84,16 @@ Stuck? → **[troubleshooting.md](troubleshooting.md)**
                     │  current.json         │  │  signals/<date>.jsonl      │
                     └───────────────────────┘  └────────────────────────────┘
                               ▲                       the demo artifact
-             DaC published by │
-             pipeline or hand │
+              you upload this │
+              from the portal │
 ```
 
 **Signals vs alerts** — the distinction the demo hinges on. A *signal* is written
 every time `rule()` returns `True`: a complete audit of everything that matched.
 An *alert* is only raised when that match also clears the detection's `Threshold`
-and isn't a duplicate of one already open. That is why 8 matches produce 3
-alerts below.
+and isn't a duplicate of one already open. Expect the alerts blob to hold far
+fewer lines than the signals blob — that gap is thresholds and dedup doing their
+job, not events going missing.
 
 ---
 
@@ -85,12 +106,13 @@ unmodified**, which is the point: what you demo is the real engine.
 
 | Missing | Substitute | Where |
 |---|---|---|
-| **Redis** (dedup / thresholds / `unique()` / storm limit / redelivery guard) | An in-process store implementing the handful of Redis commands the engine uses, injected through `StateStore`'s existing `client=` seam. `dedup.py` and `processor.py` are untouched. | [engine/pyre_engine/state.py](../../engine/pyre_engine/state.py) |
-| **Cribl lake + Torq** (where signals and alerts go) | An **append blob** — one JSON object per line, appended to the end, readable in the portal. Append is a single server-side operation, so concurrent workers can't clobber each other. | [engine/pyre_engine/blobsink.py](../../engine/pyre_engine/blobsink.py) |
+| **Redis** (dedup / thresholds / `unique()` / storm limit / redelivery guard) | An in-process store speaking the same commands, behind the same `StateStore`. The key names and TTL rules are shared code, so the two backends can't drift. | [backends/memory_state.py](../../engine/pyre_engine/backends/memory_state.py) |
+| **Cribl lake + Torq** (where signals and alerts go) | **Append blobs** — one JSON object per line, appended to the end, readable in the portal. Append is a single server-side operation, so concurrent workers can't clobber each other. | [backends/blob_sink.py](../../engine/pyre_engine/backends/blob_sink.py) |
 
-Both are selected by app settings (`STATE_BACKEND`, `OUTPUT_BLOB_ACCOUNT_URL`);
-leave them unset and the code takes the production path unchanged. That is the
-honest trade of the in-memory store, stated plainly:
+Both are selected by app settings (`STATE_BACKEND`, `SIGNALS_SINK_URL` /
+`OUTPUT_BLOB_ACCOUNT_URL`); point them at Redis and Cribl and the production path
+runs instead, with no code change. That is the honest trade of the in-memory
+store, stated plainly:
 
 > Dedup windows, thresholds and the redelivery guard live **inside one worker
 > process** and reset on a cold start. With one instance and a short demo that
@@ -98,505 +120,621 @@ honest trade of the in-memory store, stated plainly:
 > not production. Flip `STATE_BACKEND=redis` when the resource exists — nothing
 > else changes.
 
+Both live in [engine/pyre_engine/backends/](../../engine/pyre_engine/backends/),
+which is the **only** place in the engine that knows which environment it's in.
+Everything above it — routing, `rule()`, signals, thresholds, dedup, dispatch —
+is identical in the POC and in production. That's what makes this a proof of the
+real thing rather than a mock-up, and it means going to production is a
+configuration change: **[to-production.md](to-production.md)** lists the exact
+diff.
+
 The Function App also gained three small functions beside `detect`, all of them
-there to make the POC demonstrable and debuggable — `health`, `ingest`,
-`bundle_published`. See [§16](#16-app-settings-reference) and
-[engine/function_app.py](../../engine/function_app.py).
+there to make the POC demonstrable and debuggable without a CLI — `health`,
+`ingest`, `bundle_published`. See [the reference](#app-settings-reference).
 
 ---
 
 ## 3. Before you start
 
-```bash
-az --version                      # Azure CLI
-func --version                    # Azure Functions Core Tools v4
-python --version                  # 3.11 or 3.12
-az login
-az account set --subscription "<your subscription>"
-```
+On your machine you need **Python 3.11 or 3.12** and this repo. That's it.
 
-Install the Python bits you'll run locally:
-
-```bash
+```powershell
+python --version
 pip install -r engine/requirements.txt
 ```
 
-You need to be **Owner or User Access Administrator** on the resource group for
-[Step 3](#step-3--give-the-function-app-permission) (it assigns roles). If you
-aren't, hand your architect the three `az role assignment create` commands.
-
----
-
-## Step 1 — collect your resource names
-
-Fill these in once; every command below uses them.
-
-```bash
-RG=<resource-group>
-APP=pyre                                   # the Function App
-STORAGE=<storage-account-name>             # the one already attached to the app
-EHNS=<eventhub-namespace>                  # without .servicebus.windows.net
-HUB=<event-hub-name>                       # the hub inside that namespace
-```
-
-PowerShell:
+Prove the engine works before you touch Azure — this runs the real processor with
+no cloud at all, and takes about two seconds:
 
 ```powershell
-$RG="<resource-group>"; $APP="pyre"; $STORAGE="<storage-account-name>"
-$EHNS="<eventhub-namespace>"; $HUB="<event-hub-name>"
+python tools/testlab/run_local.py --bundle tools/poc/dac --file tools/poc/samples/cloudtrail_poc.jsonl
 ```
 
-Confirm they're right — this catches most later failures:
+You should see **8 signals and 3 alerts**. Those are throwaway sample detections,
+not yours — the point is only that if you see that number, every problem from
+here on is an Azure configuration problem rather than a code problem. That's
+worth knowing up front.
 
-```bash
-az functionapp show -g $RG -n $APP --query "{name:name, state:state, kind:kind, sku:sku}" -o json
-az eventhubs eventhub list -g $RG --namespace-name $EHNS --query "[].name" -o tsv
-az storage account show -g $RG -n $STORAGE --query name -o tsv
+Once you have your own detections and a real log sample, run the same check
+against them — this is the fastest loop there is, and it uses the same engine:
+
+```powershell
+python tools/testlab/run_local.py `
+  --bundle <path-to-your-dac-repo> `
+  --file my-sample.json `
+  --log-type-field Category
 ```
+
+It prints which field it routed on and which log types your bundle covers, so a
+mismatch shows up in one line before Azure is involved at all.
+
+In the portal, open your Function App and keep these four blades handy:
+
+- **Overview** — the app's URL, and Restart
+- **Settings → Environment variables** (older portals: *Configuration*)
+- **Overview → Functions** — the function list and their keys
+- **Monitoring → Log stream** — live logs
 
 ---
 
-## Step 2 — create the two blob containers
+## Step 1 — create the two blob containers
 
-The storage account has the four containers Functions made for itself. Add two:
+Portal → your **Storage account** → **Data storage → Containers** → **+ Container**.
+
+Create both, leaving *Public access level* at **Private**:
 
 | Container | Holds |
 |---|---|
 | `detections` | the published DaC bundle + the `current.json` version pointer |
 | `pyre-output` | `alerts/<date>.jsonl` and `signals/<date>.jsonl` — the demo artifact |
 
-```bash
-az storage container create --account-name $STORAGE --name detections  --auth-mode login
-az storage container create --account-name $STORAGE --name pyre-output --auth-mode login
-```
+That's the whole step. The four containers already there (`$logs`,
+`app-package`, `azure-webjobs-hosts`, `azure-webjobs-secrets`) belong to the
+Functions runtime — leave them alone.
 
-> The engine creates `pyre-output` itself if it's missing, so this is belt and
-> braces. `detections` must exist before you publish.
-
----
-
-## Step 3 — give the Function App permission
-
-The app authenticates to storage (and optionally Event Hubs) with its **managed
-identity** — no keys, no connection strings in code.
-
-```bash
-# Turn on the system-assigned identity and capture its principal id.
-PRINCIPAL=$(az functionapp identity assign -g $RG -n $APP --query principalId -o tsv)
-STORAGE_ID=$(az storage account show -g $RG -n $STORAGE --query id -o tsv)
-
-# Read the detections bundle, write the alert/signal blobs.
-az role assignment create --assignee $PRINCIPAL \
-  --role "Storage Blob Data Contributor" --scope $STORAGE_ID
-```
-
-PowerShell:
-
-```powershell
-$PRINCIPAL = az functionapp identity assign -g $RG -n $APP --query principalId -o tsv
-$STORAGE_ID = az storage account show -g $RG -n $STORAGE --query id -o tsv
-az role assignment create --assignee $PRINCIPAL --role "Storage Blob Data Contributor" --scope $STORAGE_ID
-```
-
-You also need **Storage Blob Data Contributor on yourself**, so you can publish
-the bundle and read the output from your laptop:
-
-```bash
-ME=$(az ad signed-in-user show --query id -o tsv)
-az role assignment create --assignee $ME --role "Storage Blob Data Contributor" --scope $STORAGE_ID
-```
-
-> Role assignments take **up to 5 minutes** to take effect. A `403` right after
-> this step usually just means "wait a bit".
-
-If the app already uses a **user-assigned** identity instead, use its principal
-id here and set `AZURE_CLIENT_ID` to its *client* id in Step 4.
+> The engine creates `pyre-output` itself if it's missing, so that one is belt
+> and braces. `detections` must exist before Step 5.
 
 ---
 
-## Step 4 — app settings
+## Step 2 — find out what your logs actually look like
 
-This is where you tell the engine which field to route on. **`LOG_TYPE_FIELD` is
-the setting you asked about**: the engine reads that field off every event and
-runs only the detections whose YAML `LogTypes:` lists its value.
+**Do not skip this.** Two properties of your data decide two app settings, and
+getting either wrong produces the same symptom: everything appears to work and
+no alerts ever appear.
 
-For the POC bundle, events carry `"dataset": "AWS.CloudTrail"` and the rules
-declare `LogTypes: [AWS.CloudTrail]`, so the default `dataset` is correct.
+Portal → **Event Hubs Namespace** → your hub → **Data Explorer** → **View
+events** → click any event and look at its **Body**.
 
-```bash
-az functionapp config appsettings set -g $RG -n $APP --settings \
-  PYRE_ENV=poc \
-  STATE_BACKEND=memory \
-  LOG_TYPE_FIELD=dataset \
-  EVENT_TIME_FIELD=_time \
-  EVENTHUB_NAME=$HUB \
-  BUNDLE_MODE=blob \
-  BUNDLE_BLOB_ACCOUNT_URL=https://$STORAGE.blob.core.windows.net \
-  REFRESH_INTERVAL_SECONDS=30 \
-  OUTPUT_BLOB_ACCOUNT_URL=https://$STORAGE.blob.core.windows.net \
-  OUTPUT_BLOB_CONTAINER=pyre-output \
-  DEFAULT_ROUTES=blob_alerts \
-  SIGNALS_SINK_URL= \
-  AzureFunctionsJobHost__extensions__eventHubs__maxEventBatchSize=50
+### 2a. Are your records wrapped in an envelope?
+
+Azure diagnostic settings — which is what's feeding your hub, since these are
+the platform's own logs about Event Hub activity — do **not** send one log per
+message. They batch many records into one message wrapped in a `records` array:
+
+```json
+{
+  "records": [
+    { "Category": "RuntimeAuditLogs", "ActivityName": "Authorization", "ActivityStatus": "Failure", ... },
+    { "Category": "RuntimeAuditLogs", "ActivityName": "ConnectionOpen", "ActivityStatus": "Success", ... }
+  ]
+}
 ```
 
-Then the Event Hub trigger connection. **Pick one.**
+The engine unwraps this and evaluates **each record as its own event**, so your
+detections are written against the *inner* record's fields — never the envelope.
+That behaviour is the `EVENT_ENVELOPE_FIELD` setting, and it defaults to
+`records`, which is what you want here.
 
-**(a) Connection string — simplest, recommended for the POC.**
+If your body is a single flat object with no wrapping array, set
+`EVENT_ENVELOPE_FIELD` to empty instead.
 
-```bash
-EH_CONN=$(az eventhubs namespace authorization-rule keys list \
-  -g $RG --namespace-name $EHNS --name RootManageSharedAccessKey \
-  --query primaryConnectionString -o tsv)
+### 2b. Which field routes to detections, and what values does it hold?
 
-az functionapp config appsettings set -g $RG -n $APP \
-  --settings "EVENTHUB_CONNECTION=$EH_CONN"
-```
+This is the setting you were reaching for. `LOG_TYPE_FIELD` names the field the
+engine reads off **each record**; it then runs only the detections whose YAML
+`LogTypes:` lists that value.
 
-**(b) Managed identity — no secret, one extra role.** Same code, different
-settings; this is what production uses.
+For Azure diagnostic logs that field is the record's category. **Check the exact
+spelling and casing in your own events** — it is `Category` on some resources and
+`category` on others, and the match is case-sensitive:
 
-```bash
-az role assignment create --assignee $PRINCIPAL \
-  --role "Azure Event Hubs Data Receiver" \
-  --scope $(az eventhubs namespace show -g $RG -n $EHNS --query id -o tsv)
+| What you see in the record | What to set |
+|---|---|
+| `"Category": "RuntimeAuditLogs"` | `LOG_TYPE_FIELD` = `Category` |
+| `"category": "RuntimeAuditLogs"` | `LOG_TYPE_FIELD` = `category` |
 
-az functionapp config appsettings set -g $RG -n $APP --settings \
-  EVENTHUB_CONNECTION__fullyQualifiedNamespace=$EHNS.servicebus.windows.net \
-  EVENTHUB_CONNECTION__credential=managedidentity
-```
+**Write down every distinct value you see** — `RuntimeAuditLogs`,
+`ApplicationMetricsLogs`, `OperationalLogs`, whatever your diagnostic settings
+emit. Those strings are what your detections' `LogTypes:` must contain, exactly.
 
-> Set **either** `EVENTHUB_CONNECTION` **or** the two `__`-suffixed settings,
-> never both — the runtime resolves the plain one first and you'll get confusing
-> auth errors.
+Also note the field carrying the record's own timestamp (`Timestamp`, `time`, …)
+for `EVENT_TIME_FIELD`.
+
+> If Data Explorer shows nothing, no logs are flowing yet. Confirm the
+> diagnostic setting is enabled and pointed at this hub:
+> **Event Hubs Namespace → Monitoring → Diagnostic settings**.
+
+You don't have to get this perfect now — [Step 6](#step-6--prove-it-works) shows
+you how the engine reports a mismatch, naming the exact values it saw.
+
+---
+
+## Step 3 — app settings
+
+Portal → **Function App** → **Settings → Environment variables** → **App
+settings** tab. Add each of these with **+ Add**, then click **Apply** at the
+bottom and confirm the restart.
+
+Three of these come straight from what you found in Step 2 — they're marked
+**(from Step 2)**.
+
+| Name | Value |
+|---|---|
+| `PYRE_ENV` | `poc` |
+| `STATE_BACKEND` | `memory` |
+| `LOG_TYPE_FIELD` | **(from Step 2)** — e.g. `Category` |
+| `EVENT_TIME_FIELD` | **(from Step 2)** — e.g. `Timestamp` |
+| `EVENT_ENVELOPE_FIELD` | **(from Step 2)** — `records` for Azure diagnostic logs |
+| `BUNDLE_MODE` | `blob` |
+| `BUNDLE_BLOB_ACCOUNT_URL` | `https://<storage-account>.blob.core.windows.net` |
+| `REFRESH_INTERVAL_SECONDS` | `30` |
+| `OUTPUT_BLOB_ACCOUNT_URL` | `https://<storage-account>.blob.core.windows.net` |
+| `OUTPUT_BLOB_CONTAINER` | `pyre-output` |
+| `DEFAULT_ROUTES` | *(leave empty)* |
+| `AzureFunctionsJobHost__extensions__eventHubs__maxEventBatchSize` | `50` |
+
+Replace `<storage-account>` with the real name — the URL is exactly
+`https://name.blob.core.windows.net`, no trailing slash and no container.
+
+Then **check** (don't add) that `EVENTHUB_NAME` is already there and matches the
+hub your architect created. It's what the trigger resolves — if it's missing, add
+it with the hub's name. The Event Hub *connection* settings should also already
+be present; [troubleshooting.md](troubleshooting.md#the-event-hub-trigger-never-fires)
+tells you what they should look like if you want to verify.
 
 `maxEventBatchSize=50` is deliberately low so a handful of demo events arrive as
-one visible batch. It is a **ceiling, not a wait**: small backlogs are still
+one visible batch. It is a **ceiling, not a wait** — small backlogs are still
 delivered immediately, so this doesn't delay anything. Production runs 256+.
 
 ---
 
-## Step 5 — deploy the function code
+## Step 4 — build and upload the function
 
-**Recommended: Core Tools.** It builds the Python dependencies *on the Linux
-worker*, so you never have to produce Linux wheels from a Windows laptop.
+### 4a. Build the zip locally
 
-```bash
-cd engine
-func azure functionapp publish pyre --python
-cd ..
+```powershell
+python tools/poc/package_function.py
 ```
 
-`engine/` is the app root: `function_app.py`, `host.json`, `requirements.txt` and
-the `pyre_engine/` package sit at the top level of the deployed package. **No
-config files are needed in the zip** — every setting the POC uses is an app
-setting, which is why this step is one command.
+This writes `dist/pyre-poc.zip` (~9 MB). It vendors the Python dependencies as
+**Linux** wheels into `.python_packages/lib/site-packages/`, which is exactly
+where the Linux worker looks — so the zip runs as-is with no build step on the
+Azure side. That's what makes a hand-upload viable.
+
+You'll see a pip warning about dependency conflicts in your *local* environment;
+ignore it. The download is isolated (`--target`) and doesn't touch your machine's
+packages.
+
+### 4b. Upload it
+
+Portal → **Function App** → **Development Tools → Advanced Tools** → **Go →**
+(opens Kudu in a new tab) → top menu **Tools → Zip Push Deploy**.
+
+Drag `dist/pyre-poc.zip` onto the page. It uploads and extracts, and the page
+shows progress. Give it a minute, then go back to the portal and **Restart** the
+app from **Overview**.
 
 <details>
-<summary><strong>Alternative: build a zip and upload it by hand</strong> (you mentioned wanting this)</summary>
+<summary><strong>If "Advanced Tools" is missing or the Zip Push Deploy page doesn't load</strong></summary>
 
-Worth doing only if Core Tools is unavailable or blocked. The script vendors
-Linux wheels into `.python_packages/lib/site-packages/`, exactly where the worker
-looks, so the zip needs no build on the far side:
+Your app is on the **Flex Consumption** plan, which doesn't have Kudu. Use the
+portal's built-in shell instead — it runs in the browser, so it isn't "CLI access
+on your computer" and is usually permitted where local CLI isn't:
 
-```bash
-python tools/poc/package_function.py
-az functionapp deployment source config-zip -g $RG -n $APP --src dist/pyre-poc.zip
-```
+1. Click the **`>_` Cloud Shell** icon in the portal's top bar, choose **Bash**.
+2. Use the **Upload/Download files** button (the ⇕ icon) to upload
+   `dist/pyre-poc.zip`.
+3. Run:
 
-**Recommendation: use Core Tools.** Both produce the same result, but the manual
-zip has two failure modes Core Tools doesn't — a dependency with no
-`manylinux` wheel, and a stale zip you forgot to rebuild. Pointing the app at a
-repo isn't worth it for a POC: it adds a deployment credential and a build
-pipeline to debug, for a step that is already one command.
+   ```bash
+   az functionapp deployment source config-zip \
+     -g <resource-group> -n pyre --src pyre-poc.zip
+   ```
+
+If Cloud Shell is also disabled by policy, send `dist/pyre-poc.zip` to your
+architect with that one command — it's the only step in this guide that needs
+anything beyond the portal.
 
 </details>
 
-Confirm the four functions registered:
+### 4c. Confirm it landed
 
-```bash
-az functionapp function list -g $RG -n $APP --query "[].{name:name}" -o table
-```
+Portal → **Function App** → **Overview**, scroll to the **Functions** list.
+Expect four: `detect`, `health`, `ingest`, `bundle_published`.
 
-Expect `detect`, `health`, `ingest`, `bundle_published`.
-
----
-
-## Step 6 — publish the detections
-
-This is the DaC half. **Two paths — start with A, move to B when A is boring.**
-
-### A. The curated POC bundle (do this first)
-
-Three self-contained rules that are guaranteed to load and fire, so your first
-run proves the *plumbing* rather than debugging someone else's detections.
-
-```bash
-python tools/poc/publish_bundle.py \
-  --account-url https://$STORAGE.blob.core.windows.net
-```
-
-It zips `tools/poc/dac/`, uploads `bundles/<version>.zip`, then flips
-`current.json`. Bundle first, pointer last — so a worker can never read a
-pointer to a bundle that isn't there yet.
-
-### B. The real external DaC repo
-
-The actual "detections as code" story: pull from the DaC repo, publish the
-result. `config/detections.yaml` points at panther-analysis today; point it at
-your fork.
-
-```bash
-python cli/pyre pull                    # clone the DaC repo → .bundle/
-python cli/pyre validate                # optional: lint before publishing
-python tools/poc/publish_bundle.py --dir .bundle \
-  --account-url https://$STORAGE.blob.core.windows.net
-```
-
-`pyre pull` stamps `.bundle/.bundle-version` with the DaC commit sha, so what's
-running is always traceable to a commit.
-
-> **Expect some rules to be skipped.** Of panther-analysis's full set, ~770
-> detections across 91 log types load; the rest reference helper modules that
-> weren't pulled. A detection that won't import is skipped and logged — it never
-> blocks the rest of the bundle. `/health` tells you exactly how many loaded.
-
-### The manual fallback you asked about
-
-If neither script can reach storage, publishing is just two blobs:
-
-```bash
-# 1. zip the detections (the .py/.yml pairs at the ROOT of the zip)
-cd tools/poc/dac && zip -r ../../../bundle.zip . && cd ../../..
-
-# 2. upload the bundle, THEN the pointer — never the other way round
-az storage blob upload --account-name $STORAGE -c detections \
-  -n bundles/manual-001.zip -f bundle.zip --auth-mode login --overwrite
-
-echo '{"version":"manual-001","path":"bundles/manual-001.zip"}' > current.json
-az storage blob upload --account-name $STORAGE -c detections \
-  -n current.json -f current.json --auth-mode login --overwrite
-```
-
-Bump `manual-001` every time. **The version string is what triggers the
-reload** — workers compare it and only re-download when it changes.
-
-You can also do this entirely in the portal: upload the zip, then upload a
-`current.json` naming it.
+If the list is empty, the app failed to import — open **Log stream** and see
+[troubleshooting.md](troubleshooting.md#the-functions-list-is-empty-after-upload).
 
 ---
 
-## Step 7 — prove it works
+## Step 5 — bundle and upload your detections
 
-### 7a. Is the engine loaded?
+This is the DaC half — the part that makes it a detection *platform*. Your
+detections live in **your own repo**, and this step turns that repo into two
+blobs.
+
+### Exactly what the detections container must contain
+
+Get this right and everything else follows. The container holds **two things**:
+
+```
+detections/                                  <- the blob container
+├── current.json                             <- the POINTER, at the container root
+└── bundles/
+    └── sha256-1c5ffec782e77d97.zip          <- the BUNDLE
+```
+
+**`current.json`** — one small JSON object naming the bundle that's live:
+
+```json
+{"version": "sha256-1c5ffec782e77d97", "path": "bundles/sha256-1c5ffec782e77d97.zip"}
+```
+
+- `path` is relative to the **container root** and must match where the zip
+  actually is, `bundles/` prefix included.
+- `version` is any string. Workers reload **when and only when this value
+  changes**, so it must be different every time the detections change. A content
+  hash gives you that for free.
+
+**The zip** — your detection files. Inside it:
+
+```
+detections/azure/eventhub_auth_failure.yml     <- metadata
+detections/azure/eventhub_auth_failure.py      <- the rule() logic, SAME folder
+detections/identity/signin_anomaly.yml
+detections/identity/signin_anomaly.py
+global_helpers/eh_helpers.yml
+global_helpers/eh_helpers.py
+```
+
+The rules that actually matter:
+
+| Rule | Why |
+|---|---|
+| **The folder layout inside the zip is entirely up to you.** The engine walks the whole tree recursively. | Nested folders, a wrapping top-level folder, everything flat — all fine. |
+| **A detection is a `.yml` + a `.py`, and the `.py` must be in the SAME folder as its `.yml`.** | `Filename:` is resolved next to the YAML, using only its basename. This is the #1 thing that silently breaks a bundle. |
+| **The `.yml` must declare `RuleID`, `Filename` and `LogTypes`.** | Missing any one and the engine skips it without an error. |
+| **`LogTypes:` values must exactly equal what your records carry** in the field named by `LOG_TYPE_FIELD` (Step 2). | Case-sensitive. `RuntimeAuditLogs` ≠ `runtimeauditlogs`. |
+| **Shared helpers need a `.yml` with `AnalysisType: global` + `Filename`.** | That's what puts their folder on the import path so `from eh_helpers import ...` resolves anywhere in the bundle. |
+| **Don't ship `*_tests.py` or `__pycache__`.** | Test files import frameworks the engine doesn't have; bytecode is built for the wrong platform. |
+
+A minimal valid `.yml`:
+
+```yaml
+AnalysisType: rule
+Filename: eventhub_auth_failure.py     # must sit next to this file
+RuleID: "Azure.EventHub.AuthFailure"
+Enabled: true
+Severity: Medium
+LogTypes:
+  - RuntimeAuditLogs                   # must match your data exactly
+Threshold: 3                           # optional; 1 = alert on first match
+DedupPeriodMinutes: 60
+```
+
+And its `.py` — only `rule()` is required:
+
+```python
+def rule(event):
+    return event.get("ActivityStatus") == "Failure"
+
+def title(event):                      # optional
+    return f"Auth failure from {event.get('ClientIp')}"
+
+def dedup(event):                      # optional; groups matches into one alert
+    return event.get("ClientIp", "unknown")
+```
+
+A complete worked pair, with every optional hook, is in
+[tools/poc/dac_bundler/example/](../../tools/poc/dac_bundler/example/).
+
+### 5a. Put the bundler in your DaC repo
+
+Copy the whole [tools/poc/dac_bundler/](../../tools/poc/dac_bundler/) folder into
+your detections repo. It's self-contained — plain Python, no dependency on this
+repo, no Azure anything. Then:
 
 ```bash
-KEY=$(az functionapp function keys list -g $RG -n $APP --function-name health --query default -o tsv)
-curl "https://$APP.azurewebsites.net/api/health?code=$KEY"
+cd <your-dac-repo>
+python dac_bundler/bundle.py
 ```
+
+It excludes itself, `.git`, `__pycache__` and `*_tests.py` automatically. If your
+rules live in a subfolder with helpers alongside:
+
+```bash
+python dac_bundler/bundle.py --source rules --extra global_helpers
+```
+
+**It validates before it zips**, and refuses to produce a bundle that would load
+nothing — a `.py` in the wrong folder, a missing `RuleID`, unparseable YAML. Then
+it prints the thing you need most:
+
+```
+validated 6 detection(s), 1 global helper(s)
+
+LogTypes declared by these detections - an event's log-type field
+must hold one of these EXACTLY, or it will never be routed:
+      6  RuntimeAuditLogs
+```
+
+**Compare that list against the values you wrote down in Step 2.** If they don't
+line up, nothing will ever fire, and this is where you find out — before
+uploading, not after.
+
+Output lands in `dist/`:
+
+```
+dist/current.json
+dist/bundles/sha256-1c5ffec782e77d97.zip
+```
+
+The version is a hash of your detection files, so it changes automatically
+whenever a rule changes — which is exactly what makes a running worker reload.
+
+Full options: [dac_bundler/README.md](../../tools/poc/dac_bundler/README.md).
+
+### 5b. Upload the two files
+
+Portal → **Storage account** → **Storage browser** → **Blob containers** →
+**detections**.
+
+**Order matters — the zip first, the pointer second:**
+
+1. **Upload** → pick `dist/bundles/<version>.zip` → expand **Advanced** → set
+   **Upload to folder** to `bundles` → Upload.
+2. **Upload** → pick `dist/current.json` → leave the folder blank (it goes at the
+   container root) → tick **Overwrite if files already exist** → Upload.
+
+That order is the whole reason publishing is two files: a worker must never be
+able to read a pointer to a bundle that isn't there yet.
+
+Old bundle zips are harmless — nothing reads them once the pointer moves on. Keep
+a few; they're a one-click rollback (re-upload a `current.json` naming an older
+one).
+
+<details>
+<summary><strong>Optional: a known-good bundle to test the plumbing first</strong></summary>
+
+If you'd rather prove the upload path works before introducing your own
+detections, this repo ships a small self-contained bundle:
+
+```powershell
+python tools/poc/publish_bundle.py
+```
+
+It writes the same two files to `dist/detections/`. Its rules are for
+`AWS.CloudTrail` and won't match your Event Hub logs — the point is only to
+confirm that a bundle loads and `/health` reports it. Swap in your own
+immediately after.
+
+</details>
+
+---
+
+## Step 6 — prove it works
+
+### 6a. Is the engine loaded?
+
+Portal → **Function App** → **Overview → Functions** → click **health** → **Get
+function URL** → copy. Paste it in a browser tab.
 
 ```json
 {
   "env": "poc",
   "state_backend": "memory",
-  "log_type_field": "dataset",
+  "log_type_field": "Category",
+  "event_time_field": "Timestamp",
+  "event_envelope_field": "records",
   "bundle_mode": "blob",
   "output_container": "pyre-output",
-  "default_routes": ["blob_alerts"],
-  "bundle_version": "sha256-5765a90e3c708bcd",
-  "detections": 3,
-  "log_types": ["AWS.CloudTrail"],
+  "default_routes": [],
+  "bundle_version": "sha256-1c5ffec782e77d97",
+  "detections": 6,
+  "log_types": ["RuntimeAuditLogs"],
   "status": "ok"
 }
 ```
 
-Read it carefully — it answers the two questions that cause every "why no
-alerts?" moment:
+Read it carefully — it answers the two questions behind every "why no alerts?"
+moment:
 
-- **`detections`** — did the bundle actually load?
-- **`log_types`** — this list must contain the exact value your events carry in
-  `log_type_field`. `AWS.CloudTrail` ≠ `aws.cloudtrail`.
+- **`detections`** — did your bundle actually load? `0` means the upload landed
+  but nothing in it was a usable detection.
+- **`log_types`** — this list is built from your detections' `LogTypes:`. It must
+  contain the exact values you saw in Step 2. If `/health` says
+  `["RuntimeAuditLogs"]` and your records carry `"Category": "OperationalLogs"`,
+  nothing will ever fire, and this is the line that tells you.
 
-A `503` with `"status": "bundle-load-failed"` means Step 6 didn't land; the
+Also confirm `log_type_field`, `event_time_field` and `event_envelope_field`
+match what you found in Step 2.
+
+A `503` with `"status": "bundle-load-failed"` means Step 5 didn't land; the
 `error` field says why.
 
-### 7b. Send logs straight to the detections
+### 6b. Send logs straight to the detections
 
 `ingest` runs the identical code path as the Event Hub trigger from
 `process_batch` onward — it just skips Event Hubs. Use it to test the *detection*
-half in isolation, so if something's wrong you know which half.
+half in isolation, so when something's wrong you know which half is at fault.
 
-```bash
-KEY=$(az functionapp function keys list -g $RG -n $APP --function-name ingest --query default -o tsv)
-curl -X POST "https://$APP.azurewebsites.net/api/ingest?code=$KEY" \
-  -H "Content-Type: application/json" \
-  --data-binary @tools/poc/samples/cloudtrail_poc.jsonl
-```
-
+Copy a real message body out of Data Explorer (Step 2) into a file, envelope and
+all — the endpoint accepts exactly what Event Hubs carries. Then, from
 PowerShell:
 
 ```powershell
-$KEY = az functionapp function keys list -g $RG -n $APP --function-name ingest --query default -o tsv
-Invoke-RestMethod -Method Post -Uri "https://$APP.azurewebsites.net/api/ingest?code=$KEY" `
-  -ContentType "application/json" `
-  -InFile tools/poc/samples/cloudtrail_poc.jsonl
+$url = "<paste the ingest function URL>"
+Invoke-RestMethod -Method Post -Uri $url -ContentType "application/json" `
+  -InFile my-sample.json
 ```
 
-→ `{"accepted": 10}`
+→ `accepted : 1`
 
-### 7c. Read the alerts
+That's one *message*. If it's an Azure envelope holding 12 records, the engine
+evaluates 12 events from it.
 
-```bash
-python tools/poc/read_output.py --account-url https://$STORAGE.blob.core.windows.net
-```
+This is an ordinary HTTPS POST — no Azure tooling involved. A file with several
+messages, one JSON object per line, works too.
 
-```
-pyre-output/alerts/2026-07-30.jsonl: 3 record(s)
+> No real data to hand yet?
+> [tools/poc/samples/eventhub_diagnostic.jsonl](../../tools/poc/samples/eventhub_diagnostic.jsonl)
+> is three Event Hubs `RuntimeAuditLogs` messages in the correct envelope shape —
+> useful for checking the envelope unwraps before your own logs are flowing.
 
-[High    ] AWS root console login from 203.0.113.10 in account [123456789012]
-           detection=POC.AWS.Console.RootLogin  dedup=root-login:123456789012
+### 6c. Read the output
 
-[Medium  ] IAM user [backdoor-svc] created by root in account [123456789012]
-           detection=POC.AWS.IAM.UserCreated  dedup=iam-user-created:123456789012:backdoor-svc
+Portal → **Storage account** → **Storage browser** → **Blob containers** →
+**pyre-output**.
 
-[Medium  ] Repeated failed AWS console logins for alice in account [123456789012]
-           detection=POC.AWS.Console.LoginFailed  dedup=login-failure:123456789012:alice
-```
+Two folders, and you want to look at both:
 
-And the full audit trail:
-
-```bash
-python tools/poc/read_output.py --account-url https://$STORAGE.blob.core.windows.net --stream signals
-```
-
-**10 events in → 8 signals → 3 alerts.** That gap is the whole story:
-
-| Events | Rule | Outcome |
+| Blob | Contains | Read it to answer |
 |---|---|---|
-| 2 root logins (different IPs) | `RootLogin` | 2 signals → **1 alert** — same dedup string, grouped |
-| 1 `CreateUser` | `UserCreated` | 1 signal → **1 alert** |
-| 4 failed logins, user `alice` | `LoginFailed` | 4 signals → **1 alert** — `Threshold: 3` cleared, then deduped |
-| 1 failed login, user `bob` | `LoginFailed` | 1 signal → **no alert** — below threshold |
-| 2 unrelated API calls | — | nothing at all |
+| `signals/<date>.jsonl` | one line per `rule()` that returned `True` | "did my detection match at all?" |
+| `alerts/<date>.jsonl` | one line per alert | "did it survive threshold + dedup?" |
 
-You can also just open `pyre-output` in the portal and read
-`alerts/<today>.jsonl` — it's plain JSON lines.
+Click a file → the **Edit** tab shows the raw JSON lines.
 
-> Re-running the exact same `ingest` payload produces **nothing new**. That's the
-> redelivery guard working: with no transport event id, the processor hashes the
-> body, and an identical body is treated as a duplicate. Change a field to send a
+Every record identifies itself, so the two streams stay readable even if you
+concatenate them:
+
+| Field | On | Meaning |
+|---|---|---|
+| `p_record_type` | both | `"signal"` or `"alert"` |
+| `p_signal_id` | signals | unique per match |
+| `p_alert_id` | alerts | unique per alert |
+| `p_alert_id` | signals | **the alert this match rolled into**, or `null` if it never reached one |
+
+That last row is the useful one. Filter the signals blob on
+`p_alert_id == "<some id>"` and you get exactly the matches that made up that
+alert; filter on `p_alert_id: null` and you get every match that was held back by
+a threshold or by `CreateAlert: false`.
+
+Signals are **never** deduplicated — they're the audit trail, and repeats are
+real. Alerts are, so one alert appears once.
+
+**Signals but no alerts** is not a failure — it's the engine's discipline
+working. An alert requires the match to also clear the detection's `Threshold`
+and not duplicate one already open within `DedupPeriodMinutes`. That gap is the
+thing worth demonstrating.
+
+**Neither?** Open **Function App → Monitoring → Log stream** and re-send. The
+engine now tells you exactly what it saw:
+
+```
+no detections are registered for these log-type values: ApplicationMetricsLogs (1 event(s)).
+A detection's YAML LogTypes must contain the value exactly.
+```
+
+```
+3 event(s) in this batch had no value in the configured log-type field 'category'
+- check LOG_TYPE_FIELD against your data
+```
+
+The first means routing worked but no detection covers that category. The second
+means `LOG_TYPE_FIELD` is wrong — usually casing. Both name the real value, so
+you can fix the setting or the `LogTypes:` and move on.
+
+> Re-posting the exact same payload produces **nothing new**. That's the
+> redelivery guard: with no transport event id, the processor hashes the body,
+> and an identical body is treated as a duplicate. Change a field to send a
 > genuinely new event.
 
 ---
 
-## Step 8 — the real path: through the Event Hub
+## Step 7 — the real path: through the Event Hub
 
-Everything above bypassed Event Hubs. Now do it properly.
+Everything above bypassed Event Hubs. Now do it properly — and entirely in the
+portal.
 
-```bash
-python tools/testlab/python_shipper.py \
-  --namespace $EHNS.servicebus.windows.net \
-  --hub $HUB \
-  --file tools/poc/samples/cloudtrail_poc.jsonl \
-  --rate 10
-```
+Since your logs are Azure's own diagnostic records about Event Hub activity,
+**the hub feeds itself**: connecting to it, sending, and failing to authorise all
+generate `RuntimeAuditLogs` records that flow back in as events. So the honest
+test is simply to generate some activity and wait.
 
-This sends with your `az login` identity, so grant yourself sender rights once:
+**Generate activity** — Portal → **Event Hubs Namespace** → your hub → **Data
+Explorer** → **Send events**, and send anything at all. That connection and send
+are themselves audited.
 
-```bash
-az role assignment create --assignee $ME \
-  --role "Azure Event Hubs Data Sender" \
-  --scope $(az eventhubs namespace show -g $RG -n $EHNS --query id -o tsv)
-```
+Azure diagnostic logs are batched before delivery, so allow **several minutes**
+(often up to 5) for records to appear. This is Azure's pipeline, not the engine.
 
-Wait ~30 seconds, then read the output again (§7c). Because these are the same
-10 events you already ingested and the in-memory dedup state is still warm, you
-may see no *new* alerts — that is correct behaviour, not a failure. To see fresh
-alerts, either restart the app (`az functionapp restart -g $RG -n $APP`) to clear
-in-memory state, or edit a field in the sample file first.
+Watch **Function App → Monitoring → Log stream** for the batch arriving, then
+re-read the output blobs.
 
-Watch it live:
+<details>
+<summary>Prefer an instant, deterministic test?</summary>
 
-```bash
-func azure functionapp logstream pyre
-```
+Data Explorer → **Send events** with **Content type** `application/json`, pasting
+one line of
+[tools/poc/samples/eventhub_diagnostic.jsonl](../../tools/poc/samples/eventhub_diagnostic.jsonl)
+as the body. That injects a correctly-shaped message immediately, without waiting
+on Azure's diagnostic batching. It only matches if your bundle has a detection
+for `RuntimeAuditLogs`.
 
----
+</details>
 
-## Optional — Event Grid for instant detection reload
-
-You have an Event Grid resource, and there's a clean use for it.
-
-By default a worker re-checks the bundle pointer every
-`REFRESH_INTERVAL_SECONDS`, so a publish goes live within ~30s. Wiring Event Grid
-turns that poll into a **push**: a blob write in `detections` fires the
-`bundle_published` function, which marks the bundle stale so the very next batch
-reloads it.
-
-```bash
-FUNC_ID=$(az functionapp show -g $RG -n $APP --query id -o tsv)/functions/bundle_published
-
-az eventgrid system-topic create -g $RG -n pyre-storage-topic \
-  --source $STORAGE_ID --topic-type Microsoft.Storage.StorageAccounts \
-  --location $(az storage account show -g $RG -n $STORAGE --query location -o tsv)
-
-az eventgrid system-topic event-subscription create -g $RG \
-  --system-topic-name pyre-storage-topic --name pyre-bundle-published \
-  --endpoint-type azurefunction --endpoint $FUNC_ID \
-  --included-event-types Microsoft.Storage.BlobCreated \
-  --subject-begins-with /blobServices/default/containers/detections/
-```
-
-The function only marks the registry stale; it never reloads inline. So a bad
-publish can't take detection down — the worker keeps serving the last-good
-registry. **Skip this if you're short on time**; the 30-second poll is fine for a
-demo.
+> In-memory dedup state is still warm from Step 6b, so repeated identical
+> activity may produce **no new alerts**. That is correct behaviour. For a clean
+> run, **Restart** the app first (Overview → Restart).
 
 ---
 
-## Optional — a pipeline that publishes the DaC
+## Changing a detection
 
-Your backup plan (pull manually, upload manually) is Step 6's fallback and it
-works fine. If you want the pipeline, the repo already has one:
-[.azure-pipelines/publish-detections.yml](../../.azure-pipelines/publish-detections.yml).
+This is the loop worth showing off, and it needs no redeploy:
 
-For the POC it needs three things:
+1. Edit a rule in your DaC repo — say, lower a `Threshold:` so something that was
+   below the bar now alerts.
+2. `python dac_bundler/bundle.py`
+3. Upload the new zip and the new `current.json` (Step 5b). The version string
+   changed automatically, because it's a hash of the rule contents.
+4. Wait 30 seconds. Re-check `/health` — `bundle_version` has changed.
+5. Restart the app (to clear dedup state) and send the same logs again. The new
+   threshold applies.
 
-1. A service connection whose identity has **Storage Blob Data Contributor** on
-   the storage account.
-2. `BUNDLE_BLOB_ACCOUNT_URL` = `https://<storage>.blob.core.windows.net`.
-3. A repository trigger on the DaC repo, so a push to a detection publishes it.
-
-**Do this last.** Get the manual path working end to end first — then the
-pipeline is just automating a sequence you've already proven.
+The Function App was never redeployed, and neither was anything else. That's the
+DaC promise, demonstrated.
 
 ---
 
-## 14. Demo script
+## Demo script
 
 Roughly 5 minutes, in this order:
 
-1. **Show a detection.** Open
-   [aws_console_root_login.py](../../tools/poc/dac/aws_cloudtrail/aws_console_root_login.py)
-   and its `.yml`. Point out that this is ordinary Python and ordinary metadata —
-   the same format as panther-analysis, portable, reviewable in a pull request.
-2. **Show it's loaded.** `curl .../api/health` → `detections: 3`,
-   `bundle_version: ...`. This came from Blob storage, not from the deployment.
-3. **Send logs.** Run the shipper (§8) into the Event Hub.
-4. **Show the alerts.** `read_output.py` → three alerts, with titles and context
-   generated by the detections' own `title()` and `alert_context()` functions.
-5. **Show the discipline.** 8 matched, 3 alerted. Walk the table in §7c — dedup
-   collapsed the root logins, the threshold held back `bob`. This is the part
-   that makes it a detection *platform* rather than a grep loop.
-6. **Change a detection live.** Edit a rule in `tools/poc/dac/`, re-run
-   `publish_bundle.py`, wait 30 seconds, send the logs again. **No redeploy.**
-   That's the DaC promise, demonstrated.
+1. **Show a detection in your repo.** Open a `.py` and its `.yml` side by side.
+   Point out that this is ordinary Python and ordinary metadata — the same format
+   as panther-analysis, portable, reviewable in a pull request, versioned in git.
+2. **Show it's loaded.** The `health` URL in a browser → `detections: N`,
+   `bundle_version: ...`. Stress that this came from **Blob storage**, not from
+   the deployment: the detections and the engine ship separately.
+3. **Send logs.** Event Hubs Data Explorer (Step 7).
+4. **Show the signals.** `pyre-output/signals/<today>.jsonl` — everything that
+   matched, the complete audit trail.
+5. **Show the alerts, and the gap.** `pyre-output/alerts/<today>.jsonl` — fewer
+   lines than signals. Explain why: thresholds held back the noise, dedup
+   collapsed repeats into one case. This is what makes it a detection platform
+   rather than a grep loop, and it's the part people don't expect.
+6. **Change a detection live.** The loop above. Edit the rule, bundle, upload two
+   blobs, `bundle_version` changes, new behaviour. **No redeploy of anything.**
 
-Step 6 is the one that lands with an audience. Rehearse it.
+Step 6 of this list is the one that lands with an audience. Rehearse it, and have
+the two blobs open in tabs before you start.
 
 ---
 
-## 15. What this POC does not prove
+## What this POC does not prove
 
 Say this out loud before anyone asks — it's the difference between a credible POC
 and an oversold one.
@@ -604,40 +742,41 @@ and an oversold one.
 | Not proven | Why | What it needs |
 |---|---|---|
 | **Correct state at scale** | Dedup/thresholds are per-worker and reset on cold start. One instance behaves right; two would double-count. | Redis (`STATE_BACKEND=redis`) — already written, just unwired |
-| **Throughput / cost at volume** | Ten events on a low batch size says nothing about millions/hour | Load test with `python_shipper.py --rate --loop`, batch size 256+ |
-| **Normalization** | The POC assumes logs already carry a log-type field. Real feeds don't. | Cribl (this is deliberately out of scope — see [architecture.md](../architecture.md)) |
+| **Throughput / cost at volume** | Ten events on a low batch size says nothing about millions/hour | A load test, batch size 256+ |
+| **Normalization** | The POC assumes logs already carry a log-type field. Real feeds don't. | Cribl (deliberately out of scope — see [architecture.md](../architecture.md)) |
 | **Alert delivery** | Alerts go to a blob, not a case tool | Torq destination — the adapter already exists in `dispatch.py` |
 | **Enrichment / lookup tables** | `p_enrichment` is stubbed | `enrichment.py` |
 | **Network isolation** | Everything is on public endpoints | The VNet + private endpoints in `infra/` |
+| **Automated DaC publishing** | You're uploading two blobs by hand | A pipeline running the same `bundle.py` — see [to-production.md](to-production.md#5-the-dac-publishes-itself) |
 | **Scheduled / correlation detections** | Streaming rules only | A separate module |
 
-The engine code paths for the first, fourth and sixth rows are already written
-and tested — the POC just doesn't have the resources to switch them on. That's a
-genuinely useful thing to be able to say.
+The code paths for rows 1, 4 and 5 are already written and tested — the POC just
+doesn't have the resources to switch them on, and switching them on is an app
+setting each. That's a genuinely useful thing to be able to say, and
+[to-production.md](to-production.md) is the receipt.
 
 ---
 
-## 16. App settings reference
+## App settings reference
 
 | Setting | POC value | What it does |
 |---|---|---|
 | `PYRE_ENV` | `poc` | Environment label |
 | `STATE_BACKEND` | `memory` | `memory` = in-process state; `redis` = production |
-| `LOG_TYPE_FIELD` | `dataset` | **The field the engine reads to route to detections.** Must match your events. |
-| `EVENT_TIME_FIELD` | `_time` | Field carrying the event's own timestamp |
-| `EVENTHUB_NAME` | your hub | Resolved into the trigger's `%EVENTHUB_NAME%` |
-| `EVENTHUB_CONNECTION` | connection string | Event Hub auth — *or* the two `__` settings below |
-| `EVENTHUB_CONNECTION__fullyQualifiedNamespace` | `<ns>.servicebus.windows.net` | Managed-identity alternative |
-| `EVENTHUB_CONNECTION__credential` | `managedidentity` | Managed-identity alternative |
+| `LOG_TYPE_FIELD` | e.g. `Category` | **The field the engine reads off each record to route to detections.** Must match your events exactly. |
+| `EVENT_TIME_FIELD` | e.g. `Timestamp` | Field carrying the record's own timestamp |
+| `EVENT_ENVELOPE_FIELD` | `records` | Field holding an array of records when one message carries many — Azure diagnostic logs always do. Empty = one message is one event. |
 | `BUNDLE_MODE` | `blob` | Where detections come from (`blob` or `local`) |
 | `BUNDLE_BLOB_ACCOUNT_URL` | `https://<storage>.blob.core.windows.net` | Account holding the `detections` container |
 | `REFRESH_INTERVAL_SECONDS` | `30` | How often a warm worker re-checks the bundle pointer |
 | `OUTPUT_BLOB_ACCOUNT_URL` | `https://<storage>.blob.core.windows.net` | Enables the append-blob sink. Unset = production path. |
 | `OUTPUT_BLOB_CONTAINER` | `pyre-output` | Container for `alerts/` and `signals/` |
-| `DEFAULT_ROUTES` | `blob_alerts` | Where alerts go when a detection doesn't specify |
-| `SIGNALS_SINK_URL` | *(empty)* | Cribl endpoint. Empty → signals go to the blob instead. |
-| `STORM_LIMIT` | *(default 1000)* | Max alerts per detection per hour |
+| `DEFAULT_ROUTES` | *(leave empty)* | Where alerts go when a detection doesn't specify |
 | `AzureFunctionsJobHost__extensions__eventHubs__maxEventBatchSize` | `50` | Events per invocation (ceiling, not a wait) |
+| `EVENTHUB_NAME` | *(already set)* | Resolved into the trigger's `%EVENTHUB_NAME%` |
+| `EVENTHUB_CONNECTION` *or* `EVENTHUB_CONNECTION__*` | *(already set)* | Event Hub auth — see [troubleshooting.md](troubleshooting.md#the-event-hub-trigger-never-fires) |
+| `SIGNALS_SINK_URL` | *(leave unset)* | Cribl endpoint. Unset → signals go to the blob instead. |
+| `STORM_LIMIT` | *(default 1000)* | Max alerts per detection per hour |
 | `AZURE_CLIENT_ID` | *(only for user-assigned MI)* | Selects which identity to use |
 
 ### The four functions
@@ -647,4 +786,4 @@ genuinely useful thing to be able to say.
 | `detect` | Event Hub (batch) | **The one that matters.** Routes, evaluates, alerts. |
 | `health` | HTTP GET | Which bundle is loaded, how many detections, which log types |
 | `ingest` | HTTP POST | Feed logs directly, bypassing Event Hubs — isolates the detection half when debugging |
-| `bundle_published` | Event Grid | Marks the bundle stale so a publish goes live immediately |
+| `bundle_published` | Event Grid | Marks the bundle stale so a publish goes live immediately (optional — see [troubleshooting.md](troubleshooting.md#optional-event-grid-instant-reload)) |

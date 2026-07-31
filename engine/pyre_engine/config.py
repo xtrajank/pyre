@@ -10,6 +10,26 @@ from dataclasses import dataclass, field
 
 import yaml
 
+# The function app root - the directory holding function_app.py, host.json and
+# (once packaged) the config/ folder. Config paths are anchored to THIS, never to
+# the working directory, so the same package behaves identically whether it's
+# started by the Azure worker, by pytest, or from a shell somewhere else.
+APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# In a deployed package config/ sits inside the app root; in the source repo it
+# sits one level up, beside engine/. Checking both means neither layout needs an
+# env var to work.
+_CONFIG_ROOTS = (APP_ROOT, os.path.dirname(APP_ROOT))
+
+
+def resolve_path(path: str) -> str:
+    """Absolute paths win. Relative ones resolve against the first root that
+    actually has the file, falling back to the deployed location so an error
+    message points where a deployment would look."""
+    if os.path.isabs(path):
+        return path
+    candidates = [os.path.normpath(os.path.join(root, path)) for root in _CONFIG_ROOTS]
+    return next((c for c in candidates if os.path.exists(c)), candidates[0])
+
 
 @dataclass
 class DacConfig:
@@ -73,7 +93,10 @@ class RuntimeConfig:
     redis_port: int = field(default_factory=lambda: int(os.environ.get("REDIS_PORT", "6380")))
     redis_use_entra: bool = field(default_factory=lambda: os.environ.get("REDIS_USE_ENTRA", "true") == "true")
     dac: DacConfig = field(default_factory=load_dac_config)
-    destinations_path: str = field(default_factory=lambda: os.environ.get("DESTINATIONS_PATH", "config/destinations.yaml"))
+    destinations_path: str = field(default_factory=lambda: resolve_path(
+        os.environ.get("DESTINATIONS_PATH", "config/destinations.yaml")))
+    sources_path: str = field(default_factory=lambda: resolve_path(
+        os.environ.get("SOURCES_PATH", "config/sources.yaml")))
     signals_sink_url: str = field(default_factory=lambda: os.environ.get("SIGNALS_SINK_URL", ""))  # Cribl HTTP source
     # Append-blob visualisation sink (POC). When set, signals and alerts are
     # appended as JSON lines to <container>/signals|alerts/<date>.jsonl instead of
@@ -90,7 +113,41 @@ class RuntimeConfig:
     # to match whatever your normalizer actually stamps.
     log_type_field: str = field(default_factory=lambda: os.environ.get("LOG_TYPE_FIELD", "dataset"))
     event_time_field: str = field(default_factory=lambda: os.environ.get("EVENT_TIME_FIELD", "_time"))
+    # Some producers put MANY log records in ONE Event Hub message, wrapped in an
+    # envelope. Azure's own diagnostic settings do exactly this: every message is
+    # {"records": [ {...}, {...} ]}. When the parsed message is an object with
+    # this field holding a list, each element is processed as its own event.
+    # Set to "" to disable and treat every message as a single event.
+    event_envelope_field: str = field(default_factory=lambda: os.environ.get("EVENT_ENVELOPE_FIELD", "records"))
 
 
 def load_runtime_config() -> RuntimeConfig:
     return RuntimeConfig()
+
+
+def event_hub_names(cfg: RuntimeConfig) -> list[str]:
+    """Which Event Hubs to attach a trigger to.
+
+    One hub in the POC, many in production - and that has to be a CONFIG change,
+    not a code change, or "add a log source" means redeploying the engine. So
+    function_app.py registers one trigger per name returned here.
+
+      1. EVENTHUB_NAMES - comma-separated app setting. Explicit, wins.
+      2. config/sources.yaml - the `hub:` of every declared source, deduplicated.
+         The same file Terraform sizes the hubs from, so onboarding a source is
+         one edit in one place.
+      3. EVENTHUB_NAME - the single-hub POC setting.
+    """
+    names = [n.strip() for n in os.environ.get("EVENTHUB_NAMES", "").split(",") if n.strip()]
+    if names:
+        return list(dict.fromkeys(names))
+
+    if os.path.exists(cfg.sources_path):
+        with open(cfg.sources_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        hubs = [s["hub"] for s in (data.get("sources") or []) if s.get("hub")]
+        if hubs:
+            return list(dict.fromkeys(hubs))
+
+    single = os.environ.get("EVENTHUB_NAME", "").strip()
+    return [single] if single else []

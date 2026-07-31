@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Build a zip you can upload to the Function App by hand.
+"""Build a zip you can upload to the Function App by hand, with no CLI.
 
-The recommended deploy is Core Tools (`func azure functionapp publish pyre`),
-because it builds the Python dependencies ON the Linux worker - you don't have
-to produce Linux wheels from a Windows laptop. Use this script when you can't or
-don't want to use Core Tools: it vendors the dependencies into
-`.python_packages/lib/site-packages/`, which is exactly where the Linux Python
-worker looks, so the resulting zip needs no build step on the far side.
+Core Tools (`func azure functionapp publish`) normally builds the Python
+dependencies ON the Linux worker, so you never have to produce Linux wheels
+yourself. Without it, the zip has to arrive complete - so this script vendors the
+dependencies into `.python_packages/lib/site-packages/`, which is exactly where
+the Linux Python worker looks. The result needs no build step on the far side and
+can be dropped straight into the portal (Kudu -> Zip Push Deploy).
 
     python tools/poc/package_function.py
-    az functionapp deployment source config-zip -g <rg> -n pyre --src dist/pyre-poc.zip
+    # -> dist/pyre-poc.zip, then upload it in the portal (docs/poc/README.md step 4)
 
-    # offline detections instead of pulling them from Blob (BUNDLE_MODE=local):
+    # offline detections instead of reading them from Blob (BUNDLE_MODE=local):
     python tools/poc/package_function.py --with-bundle tools/poc/dac
 
 Needs pip able to reach PyPI. `--skip-deps` produces a code-only zip, which is
@@ -54,8 +54,8 @@ def _vendor_deps(dest: str) -> None:
         "-r", os.path.join(ENGINE, "requirements.txt"),
     ]
     if subprocess.call(cmd) != 0:
-        sys.exit("package: pip install failed. Deploy with `func azure functionapp publish` "
-                 "instead, or re-run with --skip-deps if the app already has its dependencies.")
+        sys.exit("package: pip install failed - check network/proxy access to PyPI. "
+                 "Re-run with --skip-deps only if the app already has its dependencies.")
 
 
 def main():
@@ -84,7 +84,16 @@ def main():
         else:
             shutil.copy2(src, dst)
 
-    # 2. Optional offline detections. Only needed if you're NOT publishing the
+    # 2. The declarative config the engine reads at runtime: which destinations
+    #    exist, and which hubs to attach triggers to. The POC doesn't need either
+    #    (it has no destinations and one hub via EVENTHUB_NAME), but shipping them
+    #    always is what makes going to production a SETTINGS change rather than a
+    #    repackage: turning on Torq or adding a hub is then an edit to these files
+    #    plus app settings, with the same build step.
+    shutil.copytree(os.path.join(REPO, "config"), os.path.join(staging, "config"),
+                    ignore=shutil.ignore_patterns(*SKIP_DIRS))
+
+    # 3. Optional offline detections. Only needed if you're NOT publishing the
     #    bundle to Blob; note this pins detections to the deploy, giving up the
     #    hot-reload the Blob path buys you.
     if args.with_bundle:
@@ -95,7 +104,7 @@ def main():
                         ignore=shutil.ignore_patterns(*SKIP_DIRS))
         print(f"embedded detections from {os.path.relpath(src, REPO)} -> .bundle/")
 
-    # 3. Dependencies, where the Linux worker looks for them.
+    # 4. Dependencies, where the Linux worker looks for them.
     if not args.skip_deps:
         _vendor_deps(os.path.join(staging, ".python_packages", "lib", "site-packages"))
 
@@ -114,9 +123,11 @@ def main():
 
     mb = os.path.getsize(args.out) / (1024 * 1024)
     print(f"\n{os.path.relpath(args.out, REPO)}  ({mb:.1f} MB)")
-    print("upload it with:")
-    print(f"  az functionapp deployment source config-zip -g <rg> -n pyre "
-          f"--src {os.path.relpath(args.out, REPO)}")
+    print("\nUpload it in the portal:")
+    print("  Function App -> Development Tools -> Advanced Tools -> Go")
+    print("  -> Tools -> Zip Push Deploy -> drag the file on")
+    print("  then Restart the app from Overview.")
+    print("\n(See docs/poc/README.md step 4 for the Flex Consumption alternative.)")
 
 
 if __name__ == "__main__":
