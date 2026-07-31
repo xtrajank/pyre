@@ -36,7 +36,7 @@ def load_dac_config(path: str | None = None) -> DacConfig:
     path = path or os.environ.get("DETECTIONS_CONFIG_PATH", "config/detections.yaml")
     data = {}
     if os.path.exists(path):
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
     dac = data.get("dac", {}) or {}
     bundle = data.get("bundle", {}) or {}
@@ -59,15 +59,30 @@ def load_dac_config(path: str | None = None) -> DacConfig:
     )
 
 
+def _csv(name: str) -> list[str]:
+    return [v.strip() for v in os.environ.get(name, "").split(",") if v.strip()]
+
+
 @dataclass
 class RuntimeConfig:
     env: str = field(default_factory=lambda: os.environ.get("PYRE_ENV", "dev"))
+    # Where dedup/threshold/unique/storm state lives: "redis" (production) or
+    # "memory" (POC - in-process, per-worker, resets on cold start). See state.py.
+    state_backend: str = field(default_factory=lambda: os.environ.get("STATE_BACKEND", "redis"))
     redis_host: str = field(default_factory=lambda: os.environ.get("REDIS_HOST", ""))
     redis_port: int = field(default_factory=lambda: int(os.environ.get("REDIS_PORT", "6380")))
     redis_use_entra: bool = field(default_factory=lambda: os.environ.get("REDIS_USE_ENTRA", "true") == "true")
     dac: DacConfig = field(default_factory=load_dac_config)
     destinations_path: str = field(default_factory=lambda: os.environ.get("DESTINATIONS_PATH", "config/destinations.yaml"))
     signals_sink_url: str = field(default_factory=lambda: os.environ.get("SIGNALS_SINK_URL", ""))  # Cribl HTTP source
+    # Append-blob visualisation sink (POC). When set, signals and alerts are
+    # appended as JSON lines to <container>/signals|alerts/<date>.jsonl instead of
+    # needing Cribl/Torq. Empty = disabled, and the normal HTTP paths apply.
+    output_blob_account_url: str = field(default_factory=lambda: os.environ.get("OUTPUT_BLOB_ACCOUNT_URL", ""))
+    output_blob_container: str = field(default_factory=lambda: os.environ.get("OUTPUT_BLOB_CONTAINER", "pyre-output"))
+    # Routes used when a detection doesn't name its own destinations().
+    # Comma-separated app setting, e.g. "blob_alerts".
+    default_routes: list[str] = field(default_factory=lambda: _csv("DEFAULT_ROUTES"))
     storm_limit_per_hour: int = field(default_factory=lambda: int(os.environ.get("STORM_LIMIT", "1000")))
     # Which event field selects detections and which carries the event's own
     # timestamp. Defaults match Cribl's own field names (not Panther's `p_`

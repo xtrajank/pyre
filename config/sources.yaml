@@ -4,6 +4,16 @@
 # Give high-volume sources their own hub + more partitions to isolate scaling.
 
 sources:
+  # The POC's single source (docs/poc/README.md). The hub already exists - it was
+  # created by hand, not by this file - so this entry is here to declare the log
+  # type the POC detections route on, which is what `pyre validate` checks
+  # against. Change `log_types` if you point the POC at a different feed.
+  - name: poc
+    log_types: [AWS.CloudTrail]
+    hub: logs-in
+    partitions: 2
+    retention_hours: 24
+
   - name: palo_traffic
     log_types: [SEC_Network_Palo_Alto_Traffic]
     hub: palo-traffic-in            # dedicated hub: isolates Palo's firehose

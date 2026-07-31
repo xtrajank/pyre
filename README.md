@@ -51,6 +51,7 @@ Each directory has its own `README.md` that goes deep on that topic. Start at th
 
 ## Pointers
 
+- **Stand up the bare-bones POC in Azure:** [docs/poc/README.md](docs/poc/README.md) — one Function App, one Event Hub, one Storage Account; no Redis, no Cribl, no Torq. Alerts land in a blob you can read.
 - **See it work on your laptop ($0, no Azure):** [docs/local-dev.md](docs/local-dev.md) — `python tools/testlab/run_local.py`.
 - **Deploy an environment (dev or prod) to Azure:** [docs/PRODUCTION.md § 9](docs/PRODUCTION.md#9-spin-up-cloud) — provision, deploy the engine, publish detections, connect Cribl + Torq.
 - **Add or change a detection:** edit it in your external detections repo and `git push` — pyre hot-reloads it within ~a minute. See [detections/README.md](detections/README.md).

@@ -16,6 +16,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
+from .blobsink import AppendBlobSink
 from .config import RuntimeConfig
 from .registry import BundleLoader
 from .dac import source_from_config
@@ -24,6 +25,7 @@ from .enrichment import Enricher
 from .dispatch import Dispatcher
 from .event import Event
 from .signals import SignalWriter
+from .state import make_state_store
 from .models import Signal, Alert
 
 log = logging.getLogger("pyre.processor")
@@ -48,8 +50,9 @@ class Processor:
     def __init__(self, cfg: RuntimeConfig, state: StateStore | None = None):
         self.cfg = cfg
         # `state` is injectable so a local run/test can pass a fakeredis-backed
-        # StateStore; in Azure it defaults to the real (Entra/TLS) Redis.
-        self.state = state or StateStore(cfg.redis_host, cfg.redis_port, cfg.redis_use_entra)
+        # StateStore; otherwise the backend is chosen by cfg.state_backend -
+        # Redis in production, an in-process store for the POC (see state.py).
+        self.state = state or make_state_store(cfg)
         # Detections come from the external DaC repo via a hot-reloading bundle,
         # not a static local dir. `loader.get()` returns a fresh Registry within
         # refresh_interval_seconds of a push, without per-event cost.
@@ -59,8 +62,19 @@ class Processor:
             enabled_provider=_load_enabled_ids,
         )
         self.enricher = Enricher(self.state)
-        self.dispatcher = Dispatcher(cfg.destinations_path)
-        self.signals = SignalWriter(cfg.signals_sink_url)
+        # POC output: two append-blob streams in one container - `signals/` (every
+        # match, plus the alert record) and `alerts/` (what was actually delivered
+        # to a destination). Both are None-op'd out when the account URL is unset,
+        # which is the production path (Cribl + Torq).
+        blob = cfg.output_blob_account_url
+        self.dispatcher = Dispatcher(
+            cfg.destinations_path,
+            blob_sink=AppendBlobSink(blob, cfg.output_blob_container, "alerts") if blob else None,
+        )
+        self.signals = SignalWriter(
+            cfg.signals_sink_url,
+            blob_sink=AppendBlobSink(blob, cfg.output_blob_container, "signals") if blob else None,
+        )
 
     def process_batch(self, raw_events: list[str], event_ids: list[str] | None = None) -> None:
         registry = self.loader.get()          # hot-reloads on a DaC push / enable flip
@@ -166,7 +180,7 @@ class Processor:
                 log.error("storm limit hit for detection %s (>%s alerts in hour %s); alert dropped, signal retained",
                           det.id, self.cfg.storm_limit_per_hour, hour)
                 continue
-            routes = det.destinations(event) or _default_routes(self.cfg.env)
+            routes = det.destinations(event) or _default_routes(self.cfg)
             alert.destinations = routes
             self.signals.add_alert(alert)
             self.dispatcher.send(alert, routes)
@@ -174,5 +188,10 @@ class Processor:
         self.signals.flush()  # batched write-back to Cribl
 
 
-def _default_routes(env: str) -> list[str]:
-    return ["mock"] if env == "dev" else ["torq_prod"]
+def _default_routes(cfg: RuntimeConfig) -> list[str]:
+    """Where an alert goes when its detection doesn't name destinations(). The
+    DEFAULT_ROUTES app setting wins (the POC sets it to blob_alerts); otherwise
+    fall back to the per-env convention."""
+    if cfg.default_routes:
+        return cfg.default_routes
+    return ["mock"] if cfg.env == "dev" else ["torq_prod"]

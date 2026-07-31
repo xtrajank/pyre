@@ -1,0 +1,8 @@
+AnalysisType: global
+GlobalID: poc_helpers
+Filename: poc_helpers.py
+Description: >
+  Shared helpers the POC detections import by bare name. Present so the POC
+  exercises the same global-helper import path that panther-analysis relies on
+  (see engine/pyre_engine/registry.py `_prepare_imports`) - if this loading
+  mechanism is broken, the POC detections fail loudly rather than silently.

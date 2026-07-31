@@ -11,8 +11,11 @@ import requests
 
 
 class SignalWriter:
-    def __init__(self, sink_url: str):
+    def __init__(self, sink_url: str, blob_sink=None):
         self._url = sink_url  # Cribl HTTP source endpoint
+        # POC fallback when there is no Cribl to write back to: an append-blob
+        # sink (see blobsink.py). Used only when no sink_url is configured.
+        self._blob = blob_sink
         self._buf: list[dict] = []
 
     def add_signal(self, signal) -> None:
@@ -32,11 +35,13 @@ class SignalWriter:
         })
 
     def flush(self) -> None:
-        if not self._buf or not self._url:
-            self._buf.clear()
+        if not self._buf:
             return
-        # Cribl HTTP source accepts newline-delimited JSON or an array.
         try:
-            requests.post(self._url, json=self._buf, timeout=10)
+            if self._url:
+                # Cribl HTTP source accepts newline-delimited JSON or an array.
+                requests.post(self._url, json=self._buf, timeout=10)
+            elif self._blob is not None:
+                self._blob.append(self._buf)
         finally:
             self._buf.clear()

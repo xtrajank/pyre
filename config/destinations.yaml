@@ -3,6 +3,15 @@
 # Key Vault via *_env references, never inline.
 
 destinations:
+  # POC sink. Appends each delivered alert as a JSON line to
+  # <OUTPUT_BLOB_CONTAINER>/alerts/<UTC date>.jsonl - no external service needed.
+  # The engine also registers this destination automatically whenever
+  # OUTPUT_BLOB_ACCOUNT_URL is set, so the POC function package ships no config
+  # files at all; this entry is here so a local run behaves identically.
+  - name: blob_alerts
+    kind: blob
+    enabled: true
+
   - name: mock                 # test-lab sink
     kind: mock
     enabled: true

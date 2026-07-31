@@ -111,6 +111,16 @@ class Registry:
     def for_log_type(self, log_type: str) -> list[Detection]:
         return self._by_log_type.get(log_type, [])
 
+    def stats(self) -> dict:
+        """What actually loaded. The health endpoint returns this so you can tell
+        "no alerts because nothing matched" apart from "no alerts because the
+        bundle is empty or the log type is spelled differently"."""
+        ids = {d.id for dets in self._by_log_type.values() for d in dets}
+        return {
+            "detections": len(ids),
+            "log_types": sorted(self._by_log_type),
+        }
+
 
 def _load_module(name: str, path: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
@@ -123,10 +133,15 @@ def _read_meta(path: str) -> dict:
     """Parse a detection/global YAML; return {} for empty or malformed files so a
     single bad file never crashes the whole bundle load."""
     try:
-        with open(path) as fh:
+        # encoding is explicit: detection YAML is UTF-8, but Python defaults to
+        # the locale codec (cp1252 on Windows), which would make a rule file
+        # containing any non-ASCII character silently vanish from the bundle on
+        # a local run while loading fine on the Linux worker.
+        with open(path, encoding="utf-8") as fh:
             meta = yaml.safe_load(fh)
         return meta if isinstance(meta, dict) else {}
     except Exception:
+        log.warning("skipping unreadable YAML %s", path)
         return {}
 
 
@@ -207,6 +222,20 @@ class BundleLoader:
                 # otherwise keep serving the last-good Registry; a transient blob/
                 # network blip must not stop detection.
         return self._registry
+
+    def invalidate(self) -> None:
+        """Drop the refresh throttle so the NEXT get() re-probes the source
+        immediately instead of waiting out refresh_interval_seconds. The Event
+        Grid "bundle published" trigger calls this, turning the poll into a push:
+        a publish is live in seconds. Deliberately does not reload inline - the
+        reload still happens on the batch path, where a failure keeps serving the
+        last-good Registry."""
+        self._next_check = 0.0
+
+    @property
+    def version(self) -> str | None:
+        """The bundle version currently loaded, or None before the first load."""
+        return self._loaded_key[0] if self._loaded_key else None
 
     def _maybe_reload(self) -> None:
         version = self._source.current_version()

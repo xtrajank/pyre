@@ -15,7 +15,10 @@ def main(argv):
 
     sub.add_parser("pull", help="clone the external DaC repo (config/detections.yaml) into the local bundle")
 
-    sub.add_parser("validate", help="lint YAML, check LogTypes + Filename resolve")
+    v = sub.add_parser("validate", help="lint YAML, check LogTypes + Filename resolve")
+    v.add_argument("--strict", action="store_true",
+                   help="treat 'LogTypes has no Event Hub in config/sources.yaml' as an error "
+                        "(default: warn - a broad bundle legitimately covers un-onboarded sources)")
 
     t = sub.add_parser("test", help="run detection unit tests")
     t.add_argument("detection_id", nargs="?", default=None)

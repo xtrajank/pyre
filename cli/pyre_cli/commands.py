@@ -20,7 +20,10 @@ CFG_PATH = os.path.join(REPO, "config", "detections.yaml")
 def _cfg():
     if not os.path.exists(CFG_PATH):
         return {}
-    with open(CFG_PATH) as fh:
+    # encoding is explicit everywhere we read DaC/config YAML: these files are
+    # UTF-8, but Python defaults to the locale codec, which on Windows is cp1252
+    # and blows up on the first non-ASCII character in a real detection.
+    with open(CFG_PATH, encoding="utf-8") as fh:
         return yaml.safe_load(fh) or {}
 
 
@@ -38,8 +41,13 @@ def _iter_meta():
         return
     for ext in ("*.yml", "*.yaml"):
         for y in glob.glob(os.path.join(bundle, "**", ext), recursive=True):
-            with open(y) as fh:
-                yield y, yaml.safe_load(fh)
+            try:
+                with open(y, encoding="utf-8") as fh:
+                    yield y, yaml.safe_load(fh)
+            except (UnicodeDecodeError, yaml.YAMLError) as e:
+                # Report it and keep going: one unreadable file in a 400-detection
+                # bundle must not stop the whole validate/build.
+                print(f"ERROR {y}: unreadable YAML ({type(e).__name__})")
 
 
 def _auth_url(repo: str, token: str) -> str:
@@ -103,7 +111,7 @@ def _declared_log_types() -> set:
     path = os.path.join(REPO, "config", "sources.yaml")
     if not os.path.exists(path):
         return set()
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
     return {lt for s in (data.get("sources") or []) for lt in (s.get("log_types") or [])}
 
@@ -112,6 +120,7 @@ def validate(args):
     if not os.path.isdir(_bundle_dir()):
         print("validate: no bundle. Run `pyre pull` first."); return 1
     errors = 0
+    unrouted = {}          # log type -> count of detections that can never fire
     declared = _declared_log_types()
     for path, meta in _iter_meta():
         if not isinstance(meta, dict):
@@ -131,13 +140,26 @@ def validate(args):
         py = os.path.join(os.path.dirname(path), os.path.basename(meta.get("Filename", "")))
         if not os.path.exists(py):
             print(f"ERROR {path}: Filename {meta.get('Filename')} not found"); errors += 1
-        # Only enforced when sources.yaml actually declares something - an empty/
-        # missing file disables the check rather than flagging every detection.
+        # A detection whose LogTypes aren't in sources.yaml loads fine but can
+        # never see a matching event. That's a WARNING, not an error: a broad
+        # bundle (all of panther-analysis) legitimately carries hundreds of
+        # detections for sources you haven't onboarded yet, and failing on those
+        # would make `validate` useless. `--strict` makes it fatal for a curated
+        # bundle where every detection is expected to be routable.
         if declared:
             for lt in meta.get("LogTypes") or []:
                 if lt not in declared:
-                    print(f"ERROR {path}: LogTypes value '{lt}' has no matching entry in "
-                          f"config/sources.yaml (no Event Hub is sized for it)"); errors += 1
+                    unrouted[lt] = unrouted.get(lt, 0) + 1
+    if unrouted:
+        total = sum(unrouted.values())
+        print(f"WARN: {total} detection(s) across {len(unrouted)} log type(s) have no "
+              f"matching entry in config/sources.yaml, so no Event Hub feeds them:")
+        for lt, n in sorted(unrouted.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"  {n:5}  {lt}")
+        if len(unrouted) > 10:
+            print(f"  ... and {len(unrouted) - 10} more log type(s)")
+        if getattr(args, "strict", False):
+            errors += total
     print("validate: OK" if not errors else f"validate: {errors} error(s)")
     return 1 if errors else 0
 
@@ -209,6 +231,10 @@ def publish(args):
         print("publish: needs the Azure SDK -> pip install azure-identity azure-storage-blob"); return 1
 
     cc = BlobServiceClient(account_url, credential=DefaultAzureCredential()).get_container_client(container)
+    try:
+        cc.create_container()          # first publish into a fresh account
+    except Exception:
+        pass                           # already exists
     bundle_blob = f"bundles/{version}.zip"
     with open(tmpzip, "rb") as fh:
         cc.upload_blob(bundle_blob, fh, overwrite=True)                     # 1) bundle first

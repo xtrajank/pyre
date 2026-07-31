@@ -13,6 +13,7 @@ __pycache__/
 *.__pycache__/
 # build artifacts / pulled DaC bundle (detections live in an external repo)
 engine/registry_index.json
+dist/
 bundle/
 .bundle/
 .bundle.src/

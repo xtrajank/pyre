@@ -1,0 +1,12 @@
+# The bare-bones POC instance: one Function App, one Event Hub, one Storage
+# Account, no Redis, no Cribl, no Torq, no VNet. See docs/poc/README.md.
+#
+# What differs from dev/prod, and why:
+#   state_backend: memory   - no Redis resource; dedup/threshold state is
+#                             in-process and per-worker (engine/pyre_engine/state.py)
+#   default_routes: blob_alerts - alerts are appended to a blob instead of
+#                             being POSTed to Torq (no external communication)
+env: poc
+cost_profile: test
+state_backend: memory
+default_routes: [blob_alerts]
