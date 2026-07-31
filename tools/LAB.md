@@ -296,23 +296,6 @@ az redisenterprise create -n pyre-redistest -g rg-pyre-redistest -l westus2 --sk
 - **Fails** → try another (`centralus`, `eastus`, `westus3`) until one places it,
   and set `location` in `dev.tfvars` to the winner.
 
-### 5c. Bootstrap remote Terraform state (once)
-
-Production keeps state in Azure, one blob per instance. Terraform can't create the
-account it stores its own state in, so you make it by hand, once:
-
-```powershell
-az group create -n rg-pyre-tfstate -l westus2
-$STATE = "pyretfstate$(Get-Random -Maximum 100000)"    # globally unique
-az storage account create -n $STATE -g rg-pyre-tfstate -l westus2 `
-  --sku Standard_LRS --min-tls-version TLS1_2 --allow-blob-public-access false
-az storage container create -n tfstate --account-name $STATE --auth-mode login
-$STATE      # <- put THIS into infra/backend.tf (storage_account_name)
-```
-
-Open `infra/backend.tf`, set `storage_account_name` to that name and
-`resource_group_name = "rg-pyre-tfstate"`.
-
 ### 5d. Create the instance RG and grant yourself the deploy roles
 
 Shared keys are off, so the deployer reaches storage's blob **data** plane by
@@ -355,8 +338,8 @@ publisher  = { mode = "managed_identity", principal_id = "<your object id>" }
 
 ```powershell
 cd infra
-terraform init -backend-config="key=dev.tfstate"
-terraform plan  -var-file="envs/dev.tfvars"       # READ IT — every service should show public_network_access_enabled = false or Deny-by-default
+terraform init                                    # local state, nothing to bootstrap
+terraform plan  -var-file="envs/dev.tfvars"       # READ IT — every service should show public_network_access_enabled = false
 terraform apply -var-file="envs/dev.tfvars"
 ```
 
@@ -495,12 +478,10 @@ terraform -chdir=infra destroy -var-file=envs/dev.tfvars
 
 This removes every billed resource — Redis and Event Hubs, the expensive ones.
 Your detections live in Git, so nothing of value is lost — Parts 5–8 rebuild the
-identical thing. Two things `destroy` does NOT touch, because they live in
-separate resource groups it doesn't manage:
+identical thing. One resource group, so one delete:
 
 ```powershell
-az group delete -n rg-pyre-dev      --yes   # the instance RG (should be empty after destroy)
-az group delete -n rg-pyre-tfstate  --yes   # the remote-state account — ONLY if you're fully done
+az group delete -n rg-pyre-dev --yes   # the instance RG
 ```
 
 ---
@@ -518,7 +499,6 @@ az group delete -n rg-pyre-tfstate  --yes   # the remote-state account — ONLY 
 | Detection change never went live | You forgot `pyre publish`, or it's been <45s. `pull`+`build` alone change nothing in Azure. |
 | Everything green, nothing happens | Check the hub. `--hub` must be one of `terraform output eventhub_hub_names`. A hub nothing consumes accepts every event and evaluates none, silently. |
 | `pyre publish` → 403 | `publisher.principal_id` isn't your object ID, or that apply hasn't run. |
-| `terraform init` errors on the backend | `storage_account_name` in `infra/backend.tf` doesn't match the state account you created in 5c (or the container/RG is wrong). |
 | Managed Redis create fails with a generic `OperationFailed` | Regional capacity for `Balanced_B0`. That's what 5b catches — pick a region that places it. |
 
 ## Going further (what changes for the company)

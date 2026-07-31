@@ -156,16 +156,6 @@ variable "idempotency_ttl_seconds" {
     collapse on dedup).
   EOT
 }
-variable "worker_process_count" {
-  type        = number
-  default     = 4
-  description = <<-EOT
-    Worker PROCESSES per instance (FUNCTIONS_WORKER_PROCESS_COUNT). rule() is
-    CPU-bound, so processes - not threads - buy real parallelism (threads share
-    one GIL). Each process holds its own Processor (bundle + Redis pool), trading
-    instance_memory_in_mb for CPU.
-  EOT
-}
 variable "threads_per_worker" {
   type        = number
   default     = 4

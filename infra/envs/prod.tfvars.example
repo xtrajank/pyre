@@ -39,10 +39,12 @@ throughput_units_floor = 2  # guaranteed TUs (~1 MB/s in, 2 MB/s out each)
 max_throughput_units   = 20 # auto-inflate ceiling under sustained load
 
 # --- Engine tuning -----------------------------------------------------------
-# Defaults (4 processes / 4 threads / 256 batch / 900s idempotency TTL) ARE the
-# tuned prod values; override only against load-test evidence. See variables.tf.
-# worker_process_count = 4
-# threads_per_worker   = 4
+# Defaults (4 threads / 256 batch / 900s idempotency TTL) ARE the tuned prod
+# values; override only against load-test evidence. See variables.tf. Flex
+# Consumption sizes worker PROCESSES per instance itself and scales OUT under
+# load, so there is no worker_process_count knob - CPU parallelism = more
+# instances (max_throughput_units drives Event Hub scaling), not more processes.
+# threads_per_worker = 4
 
 # --- Identities (prod REQUIRES both) -----------------------------------------
 # Each is EITHER an Azure resource (its own Managed Identity) OR software outside

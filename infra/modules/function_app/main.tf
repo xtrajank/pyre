@@ -110,17 +110,13 @@ resource "azurerm_function_app_flex_consumption" "app" {
     # it is the main Redis memory driver at volume. See root variables.tf.
     IDEMPOTENCY_TTL_SECONDS = tostring(var.idempotency_ttl_seconds)
 
-    # Per-instance concurrency, pinned rather than left to the worker's defaults.
-    # rule() evaluation is CPU-bound Python, so threads inside ONE process serialise
-    # on the GIL: thread count alone buys concurrency only across the Redis/HTTP
-    # waits. Real parallelism comes from PROCESSES. Pinning both makes throughput
-    # per instance a number you chose (and can load-test) instead of one that
-    # silently changes with the host's core count or a worker release.
-    # NOTE: each process holds its OWN Processor -> its own bundle copy in memory
-    # and its own Redis pool, so this trades memory (instance_memory_in_mb) for
-    # CPU. Raise processes to use more cores; raise threads if profiling shows
-    # workers parked on Redis/Cribl rather than on CPU.
-    FUNCTIONS_WORKER_PROCESS_COUNT = tostring(var.worker_process_count)
+    # Per-instance I/O concurrency. rule() evaluation is CPU-bound Python and
+    # threads share one GIL, so this buys overlap across the Redis/HTTP waits, not
+    # CPU parallelism. On Flex Consumption you do NOT pin worker PROCESSES -
+    # FUNCTIONS_WORKER_PROCESS_COUNT is rejected outright (a 400 at create); the
+    # platform sizes worker processes per instance from instance_memory_in_mb, and
+    # CPU parallelism comes from scaling OUT (maximum_instance_count + the Event
+    # Hub trigger's target-based scaling on backlog), not up.
     PYTHON_THREADPOOL_THREAD_COUNT = tostring(var.threads_per_worker)
     # Where an alert goes when its detection names no destination itself.
     # Explicit per instance: this replaced a hardcoded `env == "dev" ? mock :

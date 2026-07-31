@@ -50,10 +50,6 @@ variable "idempotency_ttl_seconds" {
   type    = number
   default = 900 # per-EVENT Redis key TTL: the main Redis memory driver (see root variables.tf)
 }
-variable "worker_process_count" {
-  type    = number
-  default = 4 # OS processes per instance — the real parallelism (each has its own GIL)
-}
 variable "threads_per_worker" {
   type    = number
   default = 4 # threads per process — concurrent batches sharing one Processor

@@ -283,10 +283,11 @@ traces
       `public_network_access_enabled = false` + VNet integration means no public
       inbound. You need a self-hosted agent inside the VNet, or a temporary
       narrow firewall exception that you close again.
-- [ ] Each of the `worker_process_count` (default 4) processes holds **its own
-      bundle copy and its own Redis pool** inside `instance_memory_in_mb`
-      (default 2048) — ~512 MB each. Check that against a real 900-detection
-      bundle.
+- [ ] Flex Consumption sizes worker **processes per instance** itself from
+      `instance_memory_in_mb` (default 2048); each process holds **its own bundle
+      copy and its own Redis pool** (~512 MB each). Check a real 900-detection
+      bundle fits, and scale throughput by instances (`max_throughput_units`),
+      not a process count — there is no `worker_process_count` on Flex.
 - [ ] After a DaC push, confirm it goes live within `refresh_interval_seconds`
       (~45s) with **no redeploy**.
 

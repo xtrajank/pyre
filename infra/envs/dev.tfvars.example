@@ -3,8 +3,8 @@
 # Same composition as prod — only the values differ (cheaper SKUs, lab access,
 # a mock-only destination). This is the file tools/LAB.md walks you through.
 #
-#   # bootstrap remote state once (tools/LAB.md Part 3), fill infra/backend.tf, then:
-#   terraform -chdir=infra init -backend-config="key=dev.tfstate"
+#   az group create -n rg-pyre-dev -l eastus2
+#   terraform -chdir=infra init
 #   terraform -chdir=infra apply -var-file=envs/dev.tfvars
 #
 # Deploys the SAME secure architecture as prod (all private, Entra-only), just
@@ -18,7 +18,7 @@
 
 name_prefix         = "pyredev" # globally unique across ALL instances (storage/KV/EH names)
 env                 = "dev"
-location            = "westus2"
+location            = "eastus" # Managed Redis Balanced_B0 is capacity-constrained; verify your region with DEPLOY.md step 1 (eastus2/westus3 failed on 2026-07-16, eastus worked)
 resource_group_name = "rg-pyre-dev"
 cost_profile        = "test"             # cheapest SKUs: Managed Redis Balanced_B0, 1 TU Event Hubs, Flex 0 always-ready
 owner               = "<your object id>" # az ad signed-in-user show --query id -o tsv
@@ -59,8 +59,9 @@ functions_subnet_prefix = "10.0.2.0/24"
 admin_principal_ids = ["<your object id>"]
 
 # --- Engine tuning: minimal for a single low-volume feed ---------------------
-worker_process_count = 1 # one bundle copy in the 2 GB instance; raise for real volume
-threads_per_worker   = 1 # a single-user lab needs no I/O overlap
+# Flex Consumption sizes worker PROCESSES per instance itself (from instance
+# memory) and scales OUT under load - there is no worker_process_count knob.
+threads_per_worker = 1 # Python I/O threads per worker; a single-user lab needs no overlap
 # Feed shape (log-type field, event-time field, envelope) is declared PER
 # NAMESPACE in config/sources.yaml, not here. The default `cribl` namespace is
 # already dataset / _time / no-envelope - what testlab samples stamp.

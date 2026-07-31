@@ -1,16 +1,17 @@
-# One-time: create the remote state backend (private, locked).
-# az group create -n rg-tfstate -l eastus2
-# az storage account create -n pyretfstate -g rg-tfstate -l eastus2 \
-#   --sku Standard_LRS --min-tls-version TLS1_2 --allow-blob-public-access false
-# az storage container create -n tfstate --account-name pyretfstate --auth-mode login
+# Terraform state backend.
 #
-# Then copy this block into each env's backend.tf and `terraform init`.
+# Ships DISABLED, so `terraform init` uses LOCAL state out of the box (writes a
+# terraform.tfstate file) - good for a first deploy or a throwaway lab.
+#
+# For prod / shared / multi-instance, switch to REMOTE state: bootstrap a storage
+# account ONCE (Terraform can't create the account that holds its own state - see
+# tools/DEPLOY.md or infra/global/backend.tf.example), fill in its name below,
+# UNCOMMENT the block, and init with -backend-config="key=<instance>.tfstate".
 terraform {
-  backend "azurerm" {
-    resource_group_name  = "rg-tfstate"
-    storage_account_name = "pyretfstate"
-    container_name       = "tfstate"
-    key                  = "REPLACE-per-env.terraform.tfstate"
-    use_azuread_auth     = true
-  }
+  # backend "azurerm" {
+  #   resource_group_name  = "rg-pyre-tfstate"
+  #   storage_account_name = "<your-state-account>" # globally unique; bootstrapped out of band
+  #   container_name       = "tfstate"
+  #   use_azuread_auth     = true # Entra auth, no account keys
+  # }
 }

@@ -264,7 +264,6 @@ module "function_app" {
   app_insights_conn       = module.monitoring.app_insights_conn
   storm_limit             = var.storm_limit
   idempotency_ttl_seconds = var.idempotency_ttl_seconds
-  worker_process_count    = var.worker_process_count
   threads_per_worker      = var.threads_per_worker
   signals_sink_url        = var.signals_sink_url
   destinations            = var.destinations
