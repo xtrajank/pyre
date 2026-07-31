@@ -132,15 +132,25 @@ def event_hub_names(cfg: RuntimeConfig) -> list[str]:
     not a code change, or "add a log source" means redeploying the engine. So
     function_app.py registers one trigger per name returned here.
 
-      1. EVENTHUB_NAMES - comma-separated app setting. Explicit, wins.
-      2. config/sources.yaml - the `hub:` of every declared source, deduplicated.
-         The same file Terraform sizes the hubs from, so onboarding a source is
-         one edit in one place.
-      3. EVENTHUB_NAME - the single-hub POC setting.
+    An app setting always beats the packaged file. That ordering matters: the
+    same package ships to every environment, so a file inside it must never be
+    able to override what an environment explicitly asked for. Attaching a
+    trigger to a hub that doesn't exist in this namespace fails the whole app, so
+    the safe default is "only what I was explicitly told".
+
+      1. EVENTHUB_NAMES - comma-separated. Many hubs, explicitly.
+      2. EVENTHUB_NAME  - one hub, explicitly. The POC setting.
+      3. config/sources.yaml - the `hub:` of every declared source, deduplicated.
+         The same file Terraform sizes the hubs from, so in production onboarding
+         a source is one edit in one place. Leave both settings unset to use it.
     """
     names = [n.strip() for n in os.environ.get("EVENTHUB_NAMES", "").split(",") if n.strip()]
     if names:
         return list(dict.fromkeys(names))
+
+    single = os.environ.get("EVENTHUB_NAME", "").strip()
+    if single:
+        return [single]
 
     if os.path.exists(cfg.sources_path):
         with open(cfg.sources_path, encoding="utf-8") as fh:
@@ -149,5 +159,4 @@ def event_hub_names(cfg: RuntimeConfig) -> list[str]:
         if hubs:
             return list(dict.fromkeys(hubs))
 
-    single = os.environ.get("EVENTHUB_NAME", "").strip()
-    return [single] if single else []
+    return []

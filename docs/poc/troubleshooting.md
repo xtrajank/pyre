@@ -21,6 +21,7 @@ Two places answer most questions:
 - [A rule matches but never alerts](#a-rule-matches-but-never-alerts)
 - [Alerts stopped appearing after a restart](#alerts-stopped-appearing-after-a-restart)
 - [Sending the same test payload twice does nothing](#sending-the-same-test-payload-twice-does-nothing)
+- [The zip upload fails](#the-zip-upload-fails)
 - [The functions list is empty after upload](#the-functions-list-is-empty-after-upload)
 - [The Event Hub trigger never fires](#the-event-hub-trigger-never-fires)
 - [Nothing in pyre-output, but alerts show in the logs](#nothing-in-pyre-output-but-alerts-show-in-the-logs)
@@ -325,6 +326,27 @@ Change any field (an `eventID`, a timestamp) to send a genuinely new event.
 
 ---
 
+## The zip upload fails
+
+Symptoms differ by cause, so match yours:
+
+| What you see | Cause | Fix |
+|---|---|---|
+| **401 Unauthorized** from Zip Push Deploy | **SCM basic auth is disabled** — the most common one in company tenants. Kudu's upload page authenticates with basic auth; policy routinely turns it off. | Deploy from **VS Code** instead (Step 4b) — it uses your Azure AD identity through ARM, not basic auth. Or ask for *SCM Basic Auth Publishing Credentials* to be enabled: Function App → Settings → Configuration. |
+| **Advanced Tools missing**, or the Kudu page won't load | The app is on **Flex Consumption**, which has no Kudu | VS Code (Step 4b). There is no portal zip upload for Flex. |
+| Upload starts, then times out or hangs | The vendored zip is ~9 MB and some proxies stall it | `--stage` + VS Code. The staged folder has no vendored wheels, so it's a fraction of the size. |
+| **403 Forbidden** | Network restrictions on the SCM site | Function App → **Settings → Networking** → check SCM site access rules. |
+| Deploy reports success, functions list stays empty | The zip's layout is wrong, or the app failed to import | [See below](#the-functions-list-is-empty-after-upload) |
+
+**Deploying from VS Code is not a workaround** — it calls the same zip-deploy API
+a pipeline calls, just triggered by hand. If it works, use it and move on.
+
+If VS Code can't see the app: check you're signed into the right tenant
+(**Azure: Sign Out**, then in again), and that the subscription is ticked in the
+Azure panel's subscription filter.
+
+---
+
 ## The functions list is empty after upload
 
 `function_app.py` failed to import, so nothing registered. Open **Monitoring →
@@ -332,18 +354,24 @@ Log stream** and restart the app to see the error.
 
 | Cause | Fix |
 |---|---|
-| Dependencies missing or built for the wrong OS | Rebuild with `python tools/poc/package_function.py` — it vendors **Linux** wheels. A zip made by hand from your local `site-packages` will not work. |
-| The zip has a wrapping folder | `function_app.py` and `host.json` must be at the **root** of the zip. Check by opening it: if you see `engine/function_app.py`, it's wrong. The script gets this right. |
-| Upload didn't finish | Re-upload, then Restart from Overview |
+| Deployed the wrong folder | `function_app.py` and `host.json` must be at the **root** of what you deploy. Deploy `dist/functionapp/` (from `--stage`), not the repo root and not `dist/`. |
+| Dependencies missing or built for the wrong OS | Use `--stage` + VS Code so the worker builds them. A hand-made zip of your local `site-packages` will never work — those are Windows wheels. |
 | Python version mismatch | The app must be on Python **3.11**. Portal → Function App → Settings → Configuration → General settings. |
+| A trigger points at a hub that doesn't exist | Indexing fails for the whole app. Check `EVENTHUB_NAME` names a real hub — and see the note below. |
 
-Verify your zip is well-formed before uploading:
+**The hub-list trap.** `config/sources.yaml` ships inside the package and lists
+the dev/prod hubs. If neither `EVENTHUB_NAME` nor `EVENTHUB_NAMES` is set, the
+engine falls back to that file and tries to attach a trigger to every hub in it —
+none of which exist in your POC namespace, which fails the app. An app setting
+always wins, so **make sure `EVENTHUB_NAME` is set** and this can't happen.
+
+Verify the staged folder before deploying:
 
 ```powershell
-python -c "import zipfile; z=zipfile.ZipFile('dist/pyre-poc.zip'); print('function_app.py' in z.namelist())"
+python -c "import os; print(os.path.exists('dist/functionapp/function_app.py'), os.path.exists('dist/functionapp/host.json'))"
 ```
 
-Must print `True`.
+Must print `True True`.
 
 ---
 

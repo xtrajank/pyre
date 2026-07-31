@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
-"""Build a zip you can upload to the Function App by hand, with no CLI.
+"""Assemble the deployable Function App root, as a folder or a zip.
 
-Core Tools (`func azure functionapp publish`) normally builds the Python
-dependencies ON the Linux worker, so you never have to produce Linux wheels
-yourself. Without it, the zip has to arrive complete - so this script vendors the
-dependencies into `.python_packages/lib/site-packages/`, which is exactly where
-the Linux Python worker looks. The result needs no build step on the far side and
-can be dropped straight into the portal (Kudu -> Zip Push Deploy).
+`engine/` is nearly the app root, but not quite: the runtime also reads
+`config/`, which lives beside it in the repo. This script puts them together so
+there is ONE artifact that every delivery mechanism can use - VS Code, a portal
+upload, or a CI/CD pipeline.
+
+    --stage   (recommended)  a folder, for VS Code / Core Tools / a pipeline
+    (default)                a zip with Linux dependencies vendored in, for a
+                             hand upload where no build runs on the far side
+
+    python tools/poc/package_function.py --stage
+    # -> dist/functionapp/  then in VS Code: right-click the folder ->
+    #    "Deploy to Function App..."   (docs/poc/README.md step 4)
 
     python tools/poc/package_function.py
-    # -> dist/pyre-poc.zip, then upload it in the portal (docs/poc/README.md step 4)
+    # -> dist/pyre-poc.zip  for a manual upload
 
     # offline detections instead of reading them from Blob (BUNDLE_MODE=local):
-    python tools/poc/package_function.py --with-bundle tools/poc/dac
+    python tools/poc/package_function.py --stage --with-bundle tools/poc/dac
 
-Needs pip able to reach PyPI. `--skip-deps` produces a code-only zip, which is
-valid ONLY if the app already has its dependencies from a previous deploy.
+--stage does NOT vendor dependencies: VS Code, Core Tools and the pipeline task
+all build them on the Linux worker from requirements.txt, which is both smaller
+to upload and guaranteed to match the worker. The zip mode vendors them, because
+nothing builds it on the far side.
 """
 import argparse
 import os
@@ -60,15 +68,25 @@ def _vendor_deps(dest: str) -> None:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=os.path.join(REPO, "dist", "pyre-poc.zip"))
+    ap.add_argument("--stage", action="store_true",
+                    help="produce a FOLDER (dist/functionapp) instead of a zip - what "
+                         "VS Code, Core Tools and the CI/CD task deploy. Skips vendoring; "
+                         "they build dependencies on the worker.")
+    ap.add_argument("--out", default=None,
+                    help="output path (default: dist/functionapp for --stage, "
+                         "dist/pyre-poc.zip otherwise)")
     ap.add_argument("--with-bundle", default=None, metavar="DIR",
-                    help="also embed a detection bundle at .bundle/ inside the zip "
+                    help="also embed a detection bundle at .bundle/ "
                          "(pair with app settings BUNDLE_MODE=local, BUNDLE_LOCAL_DIR=.bundle)")
     ap.add_argument("--skip-deps", action="store_true",
-                    help="code only; the app must already have its dependencies installed")
+                    help="zip mode only: code only; the app must already have its dependencies")
     args = ap.parse_args()
 
-    staging = os.path.join(REPO, "dist", "_staging")
+    if args.stage:
+        staging = os.path.abspath(args.out or os.path.join(REPO, "dist", "functionapp"))
+    else:
+        args.out = args.out or os.path.join(REPO, "dist", "pyre-poc.zip")
+        staging = os.path.join(REPO, "dist", "_staging")
     shutil.rmtree(staging, ignore_errors=True)
     os.makedirs(staging, exist_ok=True)
 
@@ -104,7 +122,18 @@ def main():
                         ignore=shutil.ignore_patterns(*SKIP_DIRS))
         print(f"embedded detections from {os.path.relpath(src, REPO)} -> .bundle/")
 
-    # 4. Dependencies, where the Linux worker looks for them.
+    # 4. Dependencies. Only for the zip: nothing builds a hand-uploaded zip on the
+    #    far side, so it has to arrive complete. VS Code / Core Tools / the
+    #    pipeline task all run a remote build from requirements.txt instead.
+    if args.stage:
+        print(f"staged function app -> {os.path.relpath(staging, REPO)}")
+        print("\nDeploy it from VS Code:")
+        print("  Azure extension -> Workspace -> right-click the folder")
+        print("  -> \"Deploy to Function App...\" -> pick `pyre`")
+        print("\nDependencies are built on the worker from requirements.txt, so this")
+        print("folder stays small and always matches the runtime.")
+        return
+
     if not args.skip_deps:
         _vendor_deps(os.path.join(staging, ".python_packages", "lib", "site-packages"))
 

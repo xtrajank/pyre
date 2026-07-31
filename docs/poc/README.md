@@ -42,7 +42,7 @@ verifying every connection, so you can confirm nothing was missed.
 4. [Step 1 — create the two blob containers](#step-1--create-the-two-blob-containers)
 5. [Step 2 — find out what your logs actually look like](#step-2--find-out-what-your-logs-actually-look-like)
 6. [Step 3 — app settings](#step-3--app-settings)
-7. [Step 4 — build and upload the function](#step-4--build-and-upload-the-function)
+7. [Step 4 — build and deploy the function](#step-4--build-and-deploy-the-function)
 8. [Step 5 — bundle and upload your detections](#step-5--bundle-and-upload-your-detections)
    - [**Exactly what the detections container must contain**](#exactly-what-the-detections-container-must-contain) ← the spec
 9. [Step 6 — prove it works](#step-6--prove-it-works)
@@ -52,8 +52,10 @@ verifying every connection, so you can confirm nothing was missed.
 13. [What this POC does not prove](#what-this-poc-does-not-prove)
 14. [App settings reference](#app-settings-reference)
 
-Going to production afterwards: **[to-production.md](to-production.md)** — the
-exact diff (spoiler: no engine code and no bundler code).
+Afterwards: **[to-production.md](to-production.md)** — the exact POC→production
+diff (spoiler: no engine code and no bundler code). Then
+**[continuous-deployment.md](continuous-deployment.md)** if you want push-to-main
+to deploy itself.
 
 ---
 
@@ -299,52 +301,62 @@ delivered immediately, so this doesn't delay anything. Production runs 256+.
 
 ---
 
-## Step 4 — build and upload the function
+## Step 4 — build and deploy the function
 
-### 4a. Build the zip locally
+### 4a. Stage the app root
+
+```powershell
+python tools/poc/package_function.py --stage
+```
+
+This writes `dist/functionapp/` — a **complete Function App root**: your engine
+code plus the `config/` folder the runtime reads. `engine/` on its own isn't
+quite it, because `config/` lives beside it in the repo; staging puts them
+together so one artifact works for VS Code, a manual upload, and CI/CD alike.
+
+It stays small (no vendored dependencies) because everything below builds them on
+the Linux worker from `requirements.txt` — which is both faster to upload and
+guaranteed to match the runtime.
+
+### 4b. Deploy it from VS Code
+
+You said the zip upload is failing, and this is the better route anyway:
+
+1. Install the **Azure Functions** extension if you haven't, and sign in
+   (Azure icon in the sidebar → **Sign in to Azure**).
+2. In the Azure panel, expand your subscription → **Function App** → confirm
+   `pyre` is listed.
+3. In the **Explorer**, right-click `dist/functionapp` → **Deploy to Function
+   App...** → pick `pyre` → confirm the overwrite prompt.
+4. Watch the output pane. On Linux it runs a **remote build**, so the deploy
+   finishes with dependencies already installed.
+
+This is a legitimate way to run the POC — not a workaround. Deploying from VS
+Code is the same zip-deploy API a pipeline uses, just triggered by hand, so
+moving to CI/CD later changes the trigger and nothing else.
+
+> **Why the portal upload probably failed.** Kudu's Zip Push Deploy authenticates
+> with **SCM basic auth**, which many enterprise tenants disable by policy
+> (Function App → Settings → Configuration → *SCM Basic Auth Publishing
+> Credentials* = Off). VS Code doesn't use it — it authenticates with your Azure
+> AD identity through ARM — so it works where the portal upload returns 401.
+> Flex Consumption has no Kudu at all, which produces the same symptom.
+> [More causes →](troubleshooting.md#the-zip-upload-fails)
+
+<details>
+<summary><strong>Alternative: a self-contained zip for a manual upload</strong></summary>
+
+Only if VS Code isn't available. This vendors **Linux** wheels into
+`.python_packages/lib/site-packages/`, so the zip needs no build on the far side:
 
 ```powershell
 python tools/poc/package_function.py
 ```
 
-This writes `dist/pyre-poc.zip` (~9 MB). It vendors the Python dependencies as
-**Linux** wheels into `.python_packages/lib/site-packages/`, which is exactly
-where the Linux worker looks — so the zip runs as-is with no build step on the
-Azure side. That's what makes a hand-upload viable.
-
-You'll see a pip warning about dependency conflicts in your *local* environment;
-ignore it. The download is isolated (`--target`) and doesn't touch your machine's
-packages.
-
-### 4b. Upload it
-
-Portal → **Function App** → **Development Tools → Advanced Tools** → **Go →**
-(opens Kudu in a new tab) → top menu **Tools → Zip Push Deploy**.
-
-Drag `dist/pyre-poc.zip` onto the page. It uploads and extracts, and the page
-shows progress. Give it a minute, then go back to the portal and **Restart** the
-app from **Overview**.
-
-<details>
-<summary><strong>If "Advanced Tools" is missing or the Zip Push Deploy page doesn't load</strong></summary>
-
-Your app is on the **Flex Consumption** plan, which doesn't have Kudu. Use the
-portal's built-in shell instead — it runs in the browser, so it isn't "CLI access
-on your computer" and is usually permitted where local CLI isn't:
-
-1. Click the **`>_` Cloud Shell** icon in the portal's top bar, choose **Bash**.
-2. Use the **Upload/Download files** button (the ⇕ icon) to upload
-   `dist/pyre-poc.zip`.
-3. Run:
-
-   ```bash
-   az functionapp deployment source config-zip \
-     -g <resource-group> -n pyre --src pyre-poc.zip
-   ```
-
-If Cloud Shell is also disabled by policy, send `dist/pyre-poc.zip` to your
-architect with that one command — it's the only step in this guide that needs
-anything beyond the portal.
+`dist/pyre-poc.zip` (~9 MB). Upload it via **Advanced Tools (Kudu) → Tools → Zip
+Push Deploy**, then Restart the app. You'll see a pip warning about dependency
+conflicts in your *local* environment — ignore it, the download is isolated
+(`--target`) and doesn't touch your packages.
 
 </details>
 

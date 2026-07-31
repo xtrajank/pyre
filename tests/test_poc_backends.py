@@ -376,11 +376,27 @@ def test_event_hub_names_falls_back_to_sources_yaml(monkeypatch, tmp_path):
     assert event_hub_names(RuntimeConfig(sources_path=str(src))) == ["logs-in", "palo-in"]
 
 
-def test_event_hub_names_falls_back_to_single_hub(monkeypatch, tmp_path):
+def test_an_app_setting_always_beats_the_packaged_sources_file(monkeypatch, tmp_path):
+    """The same package ships everywhere, so a file inside it must never override
+    what an environment explicitly asked for. Backwards, the POC would attach
+    triggers to the dev/prod hubs listed in the shipped sources.yaml - hubs that
+    don't exist in its namespace, which fails the whole app."""
+    src = tmp_path / "sources.yaml"
+    src.write_text("sources:\n  - name: a\n    hub: prod-hub-1\n  - name: b\n    hub: prod-hub-2\n")
+    cfg = RuntimeConfig(sources_path=str(src))
+
     monkeypatch.delenv("EVENTHUB_NAMES", raising=False)
-    monkeypatch.setenv("EVENTHUB_NAME", "only-hub")
-    cfg = RuntimeConfig(sources_path=str(tmp_path / "nope.yaml"))
-    assert event_hub_names(cfg) == ["only-hub"]
+    monkeypatch.setenv("EVENTHUB_NAME", "poc-hub")
+    assert event_hub_names(cfg) == ["poc-hub"]
+
+    monkeypatch.setenv("EVENTHUB_NAMES", "a-hub,b-hub")
+    assert event_hub_names(cfg) == ["a-hub", "b-hub"]
+
+
+def test_no_hubs_configured_is_not_a_crash(monkeypatch, tmp_path):
+    monkeypatch.delenv("EVENTHUB_NAMES", raising=False)
+    monkeypatch.delenv("EVENTHUB_NAME", raising=False)
+    assert event_hub_names(RuntimeConfig(sources_path=str(tmp_path / "nope.yaml"))) == []
 
 
 # ---- the DaC path the guide documents ---------------------------------------

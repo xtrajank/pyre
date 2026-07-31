@@ -17,6 +17,12 @@ that true, so it stays true as the system grows.
 | 3 | Alerts start opening cases | `config/destinations.yaml` + `DEFAULT_ROUTES=torq_prod` | none |
 | 4 | All hubs get a trigger, not just one | `config/sources.yaml` (or `EVENTHUB_NAMES`) | none |
 | 5 | The DaC is published by CI, not by hand | a new pipeline calling the **same** `bundle.py` | none |
+| 6 | The function is deployed by CI, not from VS Code | a new pipeline calling the **same** `--stage` | none |
+| 7 | App settings come from the repo, not the portal | `config/appsettings/<env>.json` | none |
+
+Making the repo the **sole** writer to the resource needs a few things a pipeline
+can't enforce on its own — see
+**[continuous-deployment.md](continuous-deployment.md)**.
 
 Nothing in `engine/pyre_engine/` outside `backends/` is touched, and `backends/`
 only ever gains a module — never an edit to an existing one. `bundle.py` is
@@ -217,6 +223,52 @@ account. No PAT reaches the function; it reads the bundle via managed identity.
 
 Because `bundle.py` validates and exits non-zero, a broken detection fails the
 build instead of silently publishing a bundle that loads nothing.
+
+### 6. The function deploys itself
+
+Same principle as the bundler: the artifact doesn't change, only what produces
+it. `--stage` builds the identical folder VS Code deploys, so a pipeline is the
+same two steps you already ran by hand.
+
+```yaml
+# in this repo, on push to main
+trigger:
+  branches: { include: [main] }
+
+steps:
+  - task: UsePythonVersion@0
+    inputs: { versionSpec: '3.11' }
+
+  - script: |
+      pip install -r engine/requirements.txt pytest fakeredis
+      python -m pytest tests -q
+    displayName: Test
+
+  - script: python tools/poc/package_function.py --stage
+    displayName: Stage the function app root
+
+  - task: AzureFunctionApp@2
+    inputs:
+      connectedServiceNameARM: $(serviceConnection)
+      appType: functionAppLinux
+      appName: pyre
+      package: dist/functionapp
+      runtimeStack: 'PYTHON|3.11'
+      deploymentMethod: zipDeploy
+```
+
+`AzureFunctionApp@2` authenticates through the service connection's identity, not
+SCM basic auth — so it works in tenants where the portal's zip upload doesn't,
+for the same reason VS Code does.
+
+Two things worth keeping in the pipeline:
+
+- **Run the tests before deploying.** `tests/test_poc_backends.py` asserts the two
+  state backends produce identical results, so a change that breaks the
+  environment seam fails the build rather than production.
+- **Don't let the pipeline set app settings.** Deployment and configuration
+  moving independently is what makes a rollback a redeploy of the previous
+  artifact, with no settings archaeology.
 
 ---
 
