@@ -16,7 +16,7 @@ from prod:
 
 | Resource | Notes |
 |---|---|
-| Event Hubs namespace + hub(s) | Standard tier, 1–2 partitions per hub. Mirror prod's hub *names* so `config/sources.yaml` differs only by connection. |
+| Event Hubs namespace + hub(s) | Standard tier, 1–2 partitions per hub. Mirror prod's `namespace:` labels and hub *names* so `config/sources.yaml` differs from prod's only in which app settings those labels resolve to. |
 | Storage account | Containers `detections` and `pyre-output`, both Private. |
 | Function App | Linux, Python 3.11, Consumption. System-assigned identity On. |
 | Application Insights | On the Function App. This is where you read logs. |
@@ -38,7 +38,7 @@ Identical to the POC except the label and the refresh:
 | Setting | dev |
 |---|---|
 | `PYRE_ENV` | `dev` |
-| `EVENTHUB_CONNECTION` | the dev namespace |
+| `EVENTHUB_<NAMESPACE>` per namespace in `sources.yaml` | identity-based, pointing at the dev namespace(s) — see [adding-a-log-source.md](adding-a-log-source.md) |
 | `DAC_BLOB_ACCOUNT_URL` | `https://<dev-storage>.blob.core.windows.net` |
 | `DAC_REFRESH_SECONDS` | `30` — fast feedback matters more than cost here |
 | `OUTPUT_BLOB_ACCOUNT_URL` | `https://<dev-storage>.blob.core.windows.net` |
@@ -55,7 +55,7 @@ have a dedicated dev channel to page.
 ### 1. Testing an engine change
 
 ```powershell
-python -m pytest tests -q          # 37 tests, ~3 seconds, no Azure
+python -m pytest tests -q          # 42 tests, ~4 seconds, no Azure
 python tools/run_local.py          # the whole loop on your laptop
 ```
 

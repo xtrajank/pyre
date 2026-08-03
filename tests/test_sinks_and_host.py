@@ -140,8 +140,7 @@ def test_function_app_imports_and_registers_a_trigger_per_source():
     names = _registered_functions()
     assert {"health", "ingest"} <= set(names)
     for source in function_app._config.sources:
-        expected = "detect_" + "".join(c if c.isalnum() else "_" for c in source.hub)
-        assert expected in names
+        assert source.function_name in names
 
 
 def _request(method, url, body=b"", params=None):
@@ -168,7 +167,7 @@ def test_ingest_rejects_an_unknown_source_by_name():
                                         params={"source": "not-a-hub"}))
     assert resp.status_code == 400
     body = json.loads(resp.get_body())
-    assert body["known"] == sorted(s.hub for s in function_app._config.sources)
+    assert body["known"] == sorted(function_app._sources)
 
 
 def test_ingest_accepts_an_event_hub_message_shape(monkeypatch):

@@ -32,7 +32,7 @@ App's identity needs:
 | Scope | Role |
 |---|---|
 | Storage account | Storage Blob Data Contributor |
-| Event Hubs namespace | Azure Event Hubs Data Receiver |
+| Each Event Hubs namespace in `sources.yaml` | Azure Event Hubs Data Receiver |
 | Redis | Redis Data Owner (Data Access Configuration → add the identity) |
 
 No connection strings, no keys, no secrets in app settings.
@@ -41,34 +41,43 @@ No connection strings, no keys, no secrets in app settings.
 
 ## 1. Every log source
 
-Each entry in [config/sources.yaml](../config/sources.yaml) becomes its own
-function, its own checkpoint, and its own scaling unit. There is no limit and no
-code to write.
+Each hub in [config/sources.yaml](../config/sources.yaml) becomes its own
+function, its own checkpoint, and its own scaling unit. Hubs nest under the
+Event Hubs namespace they live in — any number of namespaces, any number of
+hubs each. There is no limit and no code to write.
 
 ```yaml
-sources:
-  # Azure diagnostic logs: the defaults already fit.
-  - hub: insights-logs-signinlogs
-  - hub: insights-logs-auditlogs
+namespaces:
+  # Azure diagnostic logs: the defaults already fit both hubs.
+  - namespace: identity                            # -> app setting EVENTHUB_IDENTITY
+    hubs:
+      - hub: insights-logs-signinlogs
+      - hub: insights-logs-auditlogs
 
   # A high-volume feed on its own hub, in its own namespace.
-  - hub: palo-traffic-in
-    connection: EVENTHUB_CONNECTION_NETWORK
-    log_type_field: dataset          # what your normalizer stamps
-    event_time_field: _time
-    envelope_field: ""               # one message, one record
+  - namespace: network                             # -> app setting EVENTHUB_NETWORK
+    hubs:
+      - hub: palo-traffic-in
+        log_type_field: dataset          # what your normalizer stamps
+        event_time_field: _time
+        envelope_field: ""               # one message, one record
 
   # A feed where a second consumer already reads $Default.
-  - hub: cloudflare-in
-    consumer_group: pyre
+  - namespace: cloudflare
+    hubs:
+      - hub: cloudflare-in
+        consumer_group: pyre
 ```
 
 Rules worth knowing before you add twenty of them:
 
-- **`connection:` names an app setting, not a value.** Each namespace gets its
-  own setting; hubs in the same namespace share one.
+- **`namespace:` names an app setting, not a value.** It's a short label of your
+  choosing; every hub nested under it shares that one connection
+  automatically. Full steps for a new one: [adding-a-log-source.md](adding-a-log-source.md).
 - **Two functions on one hub need different consumer groups.** If anything else
   already consumes a hub, create a consumer group for pyre and name it.
+  `load_sources()` refuses two sources that would otherwise register the same
+  Azure function.
 - **`log_type_field` is per source because feeds genuinely differ.** An Azure
   diagnostic feed routes on `category`; a normalized feed routes on whatever the
   normalizer stamps. Check each one in Data Explorer before you add it.
@@ -79,13 +88,19 @@ Rules worth knowing before you add twenty of them:
 
 ### Onboarding a source, in order
 
+See [adding-a-log-source.md](adding-a-log-source.md) for the full walkthrough
+(RBAC, app settings, `sources.yaml`, verification). In short:
+
 1. Confirm the hub exists and is receiving (Data Explorer → View events).
-2. Note the routing field, its values, and the timestamp field. Add the entry to
+2. New namespace: grant the identity **Azure Event Hubs Data Receiver** and add
+   its `EVENTHUB_<NAMESPACE>__fullyQualifiedNamespace` / `__credential` app
+   settings. Existing namespace: skip straight to 3.
+3. Note the routing field, its values, and the timestamp field. Add the entry to
    `sources.yaml`.
-3. Publish detections whose `LogTypes:` contain those exact values.
-4. Deploy. Check `/health`: the source appears, and its values are in
-   `log_types`.
-5. Watch **Log stream** for `no detections are registered for these log-type
+4. Publish detections whose `LogTypes:` contain those exact values.
+5. Deploy. Check `/health`: the source appears, `eventhub_settings` is `[]`,
+   and its values are in `log_types`.
+6. Watch **Log stream** for `no detections are registered for these log-type
    values` — that line names anything arriving with no coverage.
 
 ---
@@ -140,7 +155,7 @@ means **you must alert on them**; see [monitoring](#monitoring).
 | Setting | prod value |
 |---|---|
 | `PYRE_ENV` | `prod` |
-| `EVENTHUB_CONNECTION` (+ one per extra namespace) | identity-based: `EVENTHUB_CONNECTION__fullyQualifiedNamespace` = `<ns>.servicebus.windows.net`, `EVENTHUB_CONNECTION__credential` = `managedidentity` |
+| `EVENTHUB_<NAMESPACE>` (one per `namespace:` in `sources.yaml`) | identity-based: `EVENTHUB_<NAMESPACE>__fullyQualifiedNamespace` = `<ns>.servicebus.windows.net`, `EVENTHUB_<NAMESPACE>__credential` = `managedidentity` |
 | `DAC_BLOB_ACCOUNT_URL` | `https://<prod-storage>.blob.core.windows.net` |
 | `DAC_CONTAINER` | `detections` |
 | `DAC_REFRESH_SECONDS` | `60` |

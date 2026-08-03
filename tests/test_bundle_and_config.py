@@ -11,7 +11,7 @@ import pytest
 
 from conftest import DAC, REPO
 from pyre_engine.bundle import LocalBundleSource
-from pyre_engine.config import Source, load_sources
+from pyre_engine.config import Source, check_eventhub_settings, load_sources
 from pyre_engine.registry import BundleLoader, Registry
 
 PUBLISH = os.path.join(DAC, "publish.py")
@@ -23,29 +23,34 @@ def test_the_shipped_sources_file_parses():
     """config/sources.yaml ships inside the deployment, so a typo in it takes
     the whole app down at cold start. Parse it here instead."""
     sources = load_sources(os.path.join(REPO, "config", "sources.yaml"))
-    assert sources and all(s.hub for s in sources)
+    assert sources and all(s.hub and s.namespace for s in sources)
 
 
-def test_a_source_only_has_to_name_its_hub(tmp_path):
+def test_a_source_only_has_to_name_its_namespace_and_hub(tmp_path):
     f = tmp_path / "s.yaml"
-    f.write_text("sources:\n  - hub: logs-in\n")
-    assert load_sources(str(f)) == [Source(hub="logs-in")]
+    f.write_text("namespaces:\n  - namespace: poc\n    hubs:\n      - hub: logs-in\n")
+    assert load_sources(str(f)) == [Source(hub="logs-in", namespace="poc")]
 
 
 def test_per_source_overrides_are_read(tmp_path):
     f = tmp_path / "s.yaml"
     f.write_text(
-        "sources:\n"
-        "  - hub: azure-in\n"
-        "  - hub: palo-in\n"
-        "    connection: EVENTHUB_CONNECTION_NET\n"
-        "    consumer_group: pyre\n"
-        "    log_type_field: dataset\n"
-        "    event_time_field: _time\n"
-        "    envelope_field: ''\n")
+        "namespaces:\n"
+        "  - namespace: poc\n"
+        "    hubs:\n"
+        "      - hub: azure-in\n"
+        "  - namespace: network\n"
+        "    fully_qualified_namespace: net.servicebus.windows.net\n"
+        "    hubs:\n"
+        "      - hub: palo-in\n"
+        "        consumer_group: pyre\n"
+        "        log_type_field: dataset\n"
+        "        event_time_field: _time\n"
+        "        envelope_field: ''\n")
     azure, palo = load_sources(str(f))
     assert (azure.log_type_field, azure.envelope_field) == ("category", "records")
-    assert palo == Source(hub="palo-in", connection="EVENTHUB_CONNECTION_NET",
+    assert palo == Source(hub="palo-in", namespace="network",
+                          fully_qualified_namespace="net.servicebus.windows.net",
                           consumer_group="pyre", log_type_field="dataset",
                           event_time_field="_time", envelope_field="")
 
@@ -54,17 +59,84 @@ def test_a_typo_in_sources_yaml_is_an_error_not_a_shrug(tmp_path):
     """Silently ignoring `log_type_feild:` would mean routing on the default and
     no alerts, with nothing anywhere saying why."""
     f = tmp_path / "s.yaml"
-    f.write_text("sources:\n  - hub: a\n    log_type_feild: Category\n")
+    f.write_text("namespaces:\n  - namespace: poc\n    hubs:\n"
+                 "      - hub: a\n        log_type_feild: Category\n")
     with pytest.raises(ValueError, match="log_type_feild"):
         load_sources(str(f))
 
-    f.write_text("sources:\n  - log_type_field: Category\n")
+    f.write_text("namespaces:\n  - namespace: poc\n    hubs:\n      - log_type_field: Category\n")
     with pytest.raises(ValueError, match="needs a `hub:`"):
+        load_sources(str(f))
+
+    f.write_text("namespaces:\n  - hubs:\n      - hub: a\n")
+    with pytest.raises(ValueError, match="needs a `namespace:`"):
         load_sources(str(f))
 
 
 def test_a_missing_sources_file_is_empty_not_a_crash(tmp_path):
     assert load_sources(str(tmp_path / "nope.yaml")) == []
+
+
+def test_a_namespace_used_twice_is_rejected(tmp_path):
+    """Namespace names become an app-setting name, so a case-only difference
+    would silently collide on the same setting."""
+    f = tmp_path / "s.yaml"
+    f.write_text(
+        "namespaces:\n"
+        "  - namespace: net\n    hubs:\n      - hub: a\n"
+        "  - namespace: NET\n    hubs:\n      - hub: b\n")
+    with pytest.raises(ValueError, match="defined twice"):
+        load_sources(str(f))
+
+
+def test_a_hub_used_twice_in_one_namespace_is_rejected(tmp_path):
+    f = tmp_path / "s.yaml"
+    f.write_text("namespaces:\n  - namespace: net\n    hubs:\n      - hub: a\n      - hub: a\n")
+    with pytest.raises(ValueError, match="listed twice"):
+        load_sources(str(f))
+
+
+def test_two_sources_that_would_share_a_function_name_are_rejected(tmp_path):
+    """Sanitizing `-` to `_` for the Azure function name can make two distinct
+    namespace/hub pairs collide even though neither the namespace nor the hub
+    was literally repeated - e.g. namespace `net-a` hub `b` and namespace `net`
+    hub `a-b` both sanitize to `detect_net_a_b`. That's exactly the case the
+    "hub listed twice" check above can't catch, so it's caught here instead."""
+    f = tmp_path / "s.yaml"
+    f.write_text(
+        "namespaces:\n"
+        "  - namespace: net-a\n    hubs:\n      - hub: b\n"
+        "  - namespace: net\n    hubs:\n      - hub: a-b\n")
+    with pytest.raises(ValueError, match="would both become the Azure function"):
+        load_sources(str(f))
+
+
+def test_connection_and_function_name_are_derived_from_namespace():
+    """No `connection:` field exists to type (or mistype) per hub - it's always
+    EVENTHUB_<NAMESPACE>, and the function name folds in the namespace too, so
+    two namespaces reusing the same hub name can't collide."""
+    net = Source(hub="palo-traffic-in", namespace="network")
+    assert net.connection == "EVENTHUB_NETWORK"
+    assert net.function_name == "detect_network_palo_traffic_in"
+
+    # A non-default consumer group disambiguates two functions on one hub.
+    second = Source(hub="palo-traffic-in", namespace="network", consumer_group="pyre")
+    assert second.function_name == "detect_network_palo_traffic_in_pyre"
+    assert net.function_name != second.function_name
+
+
+def test_check_eventhub_settings_names_the_missing_or_mismatched_namespace(monkeypatch):
+    monkeypatch.delenv("EVENTHUB_NETWORK", raising=False)
+    monkeypatch.delenv("EVENTHUB_NETWORK__fullyQualifiedNamespace", raising=False)
+    source = Source(hub="a", namespace="network", fully_qualified_namespace="net.servicebus.windows.net")
+
+    assert "no app setting" in check_eventhub_settings([source])[0]
+
+    monkeypatch.setenv("EVENTHUB_NETWORK__fullyQualifiedNamespace", "wrong.servicebus.windows.net")
+    assert "declares" in check_eventhub_settings([source])[0]
+
+    monkeypatch.setenv("EVENTHUB_NETWORK__fullyQualifiedNamespace", "net.servicebus.windows.net")
+    assert check_eventhub_settings([source]) == []
 
 
 # ---- loading a bundle -------------------------------------------------------

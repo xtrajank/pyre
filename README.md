@@ -30,6 +30,7 @@ with no redeploy. See [dac/](dac/) for a starter you can copy.
 | **[docs/poc.md](docs/poc.md)** | Stand up the POC in the portal. One hub, one storage account, alerts in a blob you can read. ~30 minutes. |
 | **[docs/dev.md](docs/dev.md)** | A second environment where changes get tested before they touch prod. |
 | **[docs/prod.md](docs/prod.md)** | All log sources, shared state, a real SIEM destination, and the deploy pipeline. |
+| **[docs/adding-a-log-source.md](docs/adding-a-log-source.md)** | Step-by-step: onboard one more namespace or hub, zero secrets, zero collisions. |
 | **[docs/troubleshooting.md](docs/troubleshooting.md)** | Deployment 403s, empty function lists, and "why no alerts?". |
 | **[dac/README.md](dac/README.md)** | Writing and publishing detections. |
 
@@ -88,24 +89,35 @@ python tools/run_local.py --bundle ..\my-detections --file my-logs.json --log-ty
 
 ## The whole configuration surface
 
-**Per source** — [config/sources.yaml](config/sources.yaml), one entry per Event
-Hub, any number of them. Only `hub:` is required:
+**Per source** — [config/sources.yaml](config/sources.yaml), one block per
+Event Hubs namespace, any number of hubs under each. Only `namespace:` and
+`hub:` are required:
 
 ```yaml
-sources:
-  - hub: logs-in                 # defaults: category / time / records envelope
-  - hub: palo-traffic-in
-    connection: EVENTHUB_CONNECTION_NETWORK
-    log_type_field: dataset
-    event_time_field: _time
-    envelope_field: ""
+namespaces:
+  - namespace: applogns           # -> app setting EVENTHUB_APPLOGNS
+    hubs:
+      - hub: logs-in                 # defaults: category / time / records envelope
+
+  - namespace: network             # -> app setting EVENTHUB_NETWORK
+    hubs:
+      - hub: palo-traffic-in
+        log_type_field: dataset
+        event_time_field: _time
+        envelope_field: ""
 ```
+
+There is no `connection:` field to type per hub. Every hub in a namespace
+shares that namespace's one connection automatically, so a typo can't point a
+hub at the wrong (or a nonexistent) namespace. See
+[docs/adding-a-log-source.md](docs/adding-a-log-source.md) for the full
+step-by-step to onboard a new one.
 
 **Per environment** — app settings in the portal:
 
 | Setting | What it does |
 |---|---|
-| `EVENTHUB_CONNECTION` | Event Hub auth. Extra namespaces get their own setting, named in `sources.yaml`. |
+| `EVENTHUB_<NAMESPACE>` | Event Hub auth for that namespace - identity-based, never a connection string. One per `namespace:` in `sources.yaml`; see [adding-a-log-source.md](docs/adding-a-log-source.md). |
 | `DAC_BLOB_ACCOUNT_URL` | `https://<account>.blob.core.windows.net` holding the published detections. Empty = read `DAC_LOCAL_DIR` off disk. |
 | `DAC_CONTAINER` | default `detections` |
 | `DAC_REFRESH_SECONDS` | default `60` — how fast a published detection goes live |
@@ -125,6 +137,6 @@ shared state.
 
 | Function | Trigger | Purpose |
 |---|---|---|
-| `detect_<hub>` | Event Hub, batched | The one that matters. One per source in `sources.yaml`. |
+| `detect_<namespace>_<hub>` | Event Hub, batched | The one that matters. One per source in `sources.yaml`. |
 | `health` | GET | Which bundle loaded, how many detections, which log types, which field each source routes on. |
 | `ingest` | POST | Feed logs straight in, bypassing Event Hubs. Isolates the detection half when you're working out which half is broken. |

@@ -124,21 +124,26 @@ Note the timestamp field too (`time`, `Timestamp`, …).
 
 ## Step 4 — point the repo at your hub
 
-Edit [config/sources.yaml](../config/sources.yaml). For a POC it is one entry:
+Edit [config/sources.yaml](../config/sources.yaml). For a POC it is one
+namespace, one hub:
 
 ```yaml
-sources:
-  - hub: logs-in                    # your hub's exact name
-    log_type_field: category        # from Step 3b - check the casing
-    event_time_field: time          # from Step 3b
-    envelope_field: records         # from Step 3a
+namespaces:
+  - namespace: poc                  # short label - becomes app setting EVENTHUB_POC
+    hubs:
+      - hub: logs-in                    # your hub's exact name
+        log_type_field: category        # from Step 3b - check the casing
+        event_time_field: time          # from Step 3b
+        envelope_field: records         # from Step 3a
 ```
 
 `log_type_field`, `event_time_field` and `envelope_field` can be omitted when
-they're already the defaults above. `hub:` cannot.
+they're already the defaults above. `namespace:` and `hub:` cannot.
 
 This file is the whole answer to "how do I add more log sources?" — another
-entry, however many you like. Nothing else changes.
+`hub:` under an existing namespace, or a whole new `namespace:` block for a
+different Event Hubs namespace, however many you like. Nothing else changes.
+See [adding-a-log-source.md](adding-a-log-source.md) once you're past the POC.
 
 ---
 
@@ -158,11 +163,14 @@ with **+ Add**, then **Apply** at the bottom and confirm the restart:
 The URL is exactly `https://name.blob.core.windows.net` — no trailing slash, no
 container.
 
-Then **check** (don't add) that `EVENTHUB_CONNECTION` is already there. It's what
-the trigger resolves. It's either a connection string, or — better — the
-identity-based trio `EVENTHUB_CONNECTION__fullyQualifiedNamespace`,
-`EVENTHUB_CONNECTION__credential` = `managedidentity`. If it's missing, see
-[troubleshooting](troubleshooting.md#the-event-hub-trigger-never-fires).
+Then add the namespace's own connection setting — for the `namespace: poc`
+above, that's `EVENTHUB_POC`. It's never a connection string here: the
+identity-based pair `EVENTHUB_POC__fullyQualifiedNamespace` =
+`<your-namespace>.servicebus.windows.net`, `EVENTHUB_POC__credential` =
+`managedidentity`. Same **Azure Event Hubs Data Receiver** role as Step 2, this
+time on the Event Hubs namespace. Full steps, and what to do for the next
+namespace, in [adding-a-log-source.md](adding-a-log-source.md). If it's
+missing, see [troubleshooting](troubleshooting.md#the-event-hub-trigger-never-fires).
 
 `maxEventBatchSize=50` is deliberately low so a handful of demo events arrive as
 one visible batch. It's a **ceiling, not a wait** — small backlogs still deliver
@@ -195,9 +203,9 @@ step: `function_app.py`, `host.json`, `requirements.txt`, `pyre_engine/` and
 Function App → **Overview**, scroll to **Functions**. Expect exactly three:
 
 ```
-detect_logs_in     Event Hub trigger      (one per source in sources.yaml)
-health             HTTP trigger
-ingest             HTTP trigger
+detect_poc_logs_in     Event Hub trigger      (one per source in sources.yaml)
+health                 HTTP trigger
+ingest                 HTTP trigger
 ```
 
 An **empty list** means the app failed to import. Open **Log stream** —
@@ -270,9 +278,11 @@ browser.
   "state": "memory",
   "output": "https://pyrestor.blob.core.windows.net/pyre-output",
   "sources": [
-    { "hub": "logs-in", "log_type_field": "category",
+    { "namespace": "poc", "hub": "logs-in", "function": "detect_poc_logs_in",
+      "log_type_field": "category",
       "event_time_field": "time", "envelope_field": "records" }
   ],
+  "eventhub_settings": [],
   "bundle_version": "sha256-1c5ffec782e77d97",
   "detections": 1,
   "log_types": ["RuntimeAuditLogs"],
@@ -280,7 +290,8 @@ browser.
 }
 ```
 
-Read it carefully — it answers the two questions behind every "why no alerts?":
+Read it carefully — it answers the three questions behind every "why no
+alerts?":
 
 - **`detections`** — did the bundle load? `0` means the upload landed but nothing
   in it was a usable detection.
@@ -288,6 +299,8 @@ Read it carefully — it answers the two questions behind every "why no alerts?"
   exact values you saw in Step 3b. If this says `["RuntimeAuditLogs"]` and your
   records carry `"category": "OperationalLogs"`, nothing will ever fire, and
   this line is what tells you.
+- **`eventhub_settings`** — non-empty means a namespace's app setting from
+  Step 5 is missing or misnamed; the entry names which one.
 
 Also check `sources[].log_type_field` against your data's actual casing.
 

@@ -1,11 +1,38 @@
 {
   "_comment": [
     "Copy to local.settings.json (gitignored) to run the Function App locally",
-    "with VS Code / Core Tools. Not needed for `python tools/run_local.py`,",
-    "which needs nothing at all.",
+    "with VS Code / Core Tools. Not needed for `python tools/run_local.py` or",
+    "`pytest`, which need no Azure at all - only the local-host / deployed path",
+    "reads any of this.",
     "",
-    "In Azure these same names are App settings: Function App ->",
-    "Settings -> Environment variables -> App settings."
+    "In Azure these same names are App settings: Function App -> Settings ->",
+    "Environment variables -> App settings. Keeping this file in sync with the",
+    "portal (add here, add there) is the whole point of listing every one.",
+    "",
+    "IDENTITY-BASED SETTINGS (the __fullyQualifiedNamespace / __credential",
+    "pairs) are never a secret - there is nothing here to rotate or leak. They",
+    "authenticate as whoever is SIGNED IN: in Azure that's the Function App's",
+    "managed identity; running this locally it's your own `az login` / VS Code",
+    "Azure sign-in. For a local run against real Azure resources to work, YOUR",
+    "identity needs the same roles the managed identity has - Storage Blob",
+    "Data Contributor on the storage account, Azure Event Hubs Data Receiver on",
+    "each namespace below. See docs/poc.md and docs/adding-a-log-source.md.",
+    "",
+    "One EVENTHUB_<NAMESPACE> pair per `namespace:` in config/sources.yaml -",
+    "the name is derived (EVENTHUB_ + the namespace, uppercased), never typed",
+    "by a source. Adding a namespace there means adding its pair here too.",
+    "",
+    "DAC_* vs OUTPUT_*: two independent blob destinations, even when (as below)",
+    "they happen to live in the SAME storage account. Both take a bare account",
+    "URL - https://<account>.blob.core.windows.net, no trailing slash, no",
+    "container in it - and the CONTAINER is its own setting: DAC_CONTAINER",
+    "(detections IN, default `detections`) and OUTPUT_BLOB_CONTAINER",
+    "(signals/alerts OUT, default `pyre-output`). One storage account for both",
+    "is just both *_ACCOUNT_URL settings pointing at the same URL, as below.",
+    "DAC_LOCAL_DIR is the exception to all of that: a local filesystem path,",
+    "read ONLY when DAC_BLOB_ACCOUNT_URL is empty - it's how `pytest` and",
+    "`run_local.py` load detections with no Azure at all, and is ignored the",
+    "moment DAC_BLOB_ACCOUNT_URL is set to anything."
   ],
   "IsEncrypted": false,
   "Values": {
@@ -14,12 +41,24 @@
 
     "PYRE_ENV": "local",
 
-    "EVENTHUB_CONNECTION": "<Event Hub namespace connection string>",
+    "EVENTHUB_PYRE_EVNTHUB__fullyQualifiedNamespace": "<namespace>.servicebus.windows.net",
+    "EVENTHUB_PYRE_EVNTHUB__credential": "managedidentity",
 
-    "DAC_BLOB_ACCOUNT_URL": "",
+    "DAC_BLOB_ACCOUNT_URL": "https://<account>.blob.core.windows.net",
+    "DAC_CONTAINER": "detections",
+    "DAC_POINTER": "current.json",
     "DAC_LOCAL_DIR": "./dac",
+    "DAC_REFRESH_SECONDS": "30",
 
-    "OUTPUT_BLOB_ACCOUNT_URL": "",
-    "OUTPUT_HTTP_URL": ""
+    "OUTPUT_HTTP_URL": "",
+    "OUTPUT_BLOB_ACCOUNT_URL": "https://<account>.blob.core.windows.net",
+    "OUTPUT_BLOB_CONTAINER": "pyre-output",
+    "ALERT_WEBHOOK_URL": "",
+
+    "REDIS_HOST": "",
+    "REDIS_PORT": "6380",
+    "STORM_LIMIT": "1000",
+
+    "AzureFunctionsJobHost__extensions__eventHubs__maxEventBatchSize": "50"
   }
 }

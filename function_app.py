@@ -3,22 +3,25 @@ lives in `pyre_engine/`.
 
 Three kinds of function:
 
-  detect_<hub>   Event Hub batch trigger, ONE PER SOURCE listed in
+  detect_<namespace>_<hub>   Event Hub batch trigger, ONE PER SOURCE listed in
                  config/sources.yaml. Adding a log source is an entry in that
-                 file - there is no code to write, however many sources you have.
+                 file - there is no code to write, however many namespaces or
+                 hubs you have.
   health         GET. Which bundle is loaded, how many detections, which log
-                 types they cover, which field each source routes on. The first
-                 thing to check when nothing alerts.
+                 types they cover, which field each source routes on, and
+                 whether every namespace's connection setting actually exists.
+                 The first thing to check when nothing alerts.
   ingest         POST logs straight into the processor, bypassing Event Hubs.
                  Proves the detection half in isolation when you're working out
                  which half is broken.
 """
 import json
 import logging
+from typing import List
 
 import azure.functions as func
 
-from pyre_engine.config import RuntimeConfig
+from pyre_engine.config import RuntimeConfig, check_eventhub_settings
 from pyre_engine.processor import Processor
 
 log = logging.getLogger("pyre.host")
@@ -28,7 +31,18 @@ app = func.FunctionApp()
 # Built once per worker process (cold start) and reused across invocations.
 _config = RuntimeConfig()
 _processor = Processor(_config)
-_sources = {s.hub: s for s in _config.sources}
+
+# Keyed by "namespace/hub" (always unique) and, as a convenience, by the bare
+# hub name too - but only when that hub name isn't shared by another
+# namespace, so an ambiguous bare name fails clearly instead of silently
+# resolving to whichever source happened to register last.
+_sources = {f"{s.namespace}/{s.hub}": s for s in _config.sources}
+_hub_counts: dict[str, int] = {}
+for _s in _config.sources:
+    _hub_counts[_s.hub] = _hub_counts.get(_s.hub, 0) + 1
+for _s in _config.sources:
+    if _hub_counts[_s.hub] == 1:
+        _sources[_s.hub] = _s
 
 
 def _register(source):
@@ -39,11 +53,7 @@ def _register(source):
     the same processor, carrying its own source so the routing fields, the
     timestamp field and the envelope shape are that source's own.
     """
-    # Azure keys checkpoints and metrics on the function name, so it must be
-    # stable across deploys and unique per hub.
-    name = "detect_" + "".join(c if c.isalnum() else "_" for c in source.hub)
-
-    @app.function_name(name=name)
+    @app.function_name(name=source.function_name)
     @app.event_hub_message_trigger(
         arg_name="events",
         event_hub_name=source.hub,
@@ -51,7 +61,7 @@ def _register(source):
         consumer_group=source.consumer_group,
         cardinality=func.Cardinality.MANY,      # deliver a BATCH, not one event
     )
-    def _trigger(events: list[func.EventHubEvent]) -> None:
+    def _trigger(events: List[func.EventHubEvent]) -> None:
         # partition_key + sequence_number is stable across an Event Hubs
         # redelivery, so it's what the redelivery guard keys on.
         _processor.process_batch(
@@ -80,6 +90,10 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
     Two fields carry the answer to almost every "why no alerts?": `detections`
     (did the bundle load?) and `log_types` (do the values your data carries in
     each source's `log_type_field` appear in this list, exactly?).
+
+    `eventhub_settings` covers the OTHER most common setup failure: a
+    namespace whose app setting was never created, or was created with a name
+    that doesn't match `sources.yaml`. Empty means every namespace resolves.
     """
     body = {
         "env": _config.env,
@@ -88,10 +102,12 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
                   (f"{_config.output_blob_account_url}/{_config.output_blob_container}"
                    if _config.output_blob_account_url else None),
         "sources": [
-            {"hub": s.hub, "log_type_field": s.log_type_field,
+            {"namespace": s.namespace, "hub": s.hub, "function": s.function_name,
+             "log_type_field": s.log_type_field,
              "event_time_field": s.event_time_field, "envelope_field": s.envelope_field or None}
             for s in _config.sources
         ],
+        "eventhub_settings": check_eventhub_settings(_config.sources),
     }
     try:
         registry = _processor.loader.get()
@@ -116,8 +132,10 @@ def ingest(req: func.HttpRequest) -> func.HttpResponse:
     Body: one JSON object, a JSON array of them, or newline-delimited JSON -
     whatever you copied out of Event Hubs Data Explorer, envelope and all.
 
-    `?source=<hub>` picks whose field config to interpret them with; the first
-    source in config/sources.yaml is the default.
+    `?source=<namespace>/<hub>` picks whose field config to interpret them
+    with; the bare `<hub>` also works when that hub name isn't shared by
+    another namespace. Omitted, the first source in config/sources.yaml is the
+    default.
 
     No transport ids exist here, so the redelivery guard falls back to hashing
     the body: posting the SAME payload twice is treated as a redelivery and the
@@ -126,12 +144,12 @@ def ingest(req: func.HttpRequest) -> func.HttpResponse:
     if not _config.sources:
         return func.HttpResponse('{"error": "no sources configured"}', status_code=503,
                                  mimetype="application/json")
-    hub = req.params.get("source")
-    if hub and hub not in _sources:
+    key = req.params.get("source")
+    if key and key not in _sources:
         return func.HttpResponse(
-            json.dumps({"error": f"unknown source {hub!r}", "known": sorted(_sources)}),
+            json.dumps({"error": f"unknown source {key!r}", "known": sorted(_sources)}),
             status_code=400, mimetype="application/json")
-    source = _sources[hub] if hub else _config.sources[0]
+    source = _sources[key] if key else _config.sources[0]
 
     raw = req.get_body().decode("utf-8").strip()
     if not raw:

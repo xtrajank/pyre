@@ -83,9 +83,10 @@ registered. Azure reports this only in the log stream.
 | In the log | Meaning |
 |---|---|
 | `ModuleNotFoundError: No module named 'yaml'` | The remote build didn't run. Redeploy with `SCM_DO_BUILD_DURING_DEPLOYMENT=true` and `ENABLE_ORYX_BUILD=true` in app settings — or from VS Code, which sets them. |
-| `ValueError: config/sources.yaml: source ... has unknown key(s)` | A typo in `sources.yaml`. The message names the key. |
-| `ValueError: ... every source needs a hub:` | A `sources.yaml` entry with no `hub:`. |
-| `The listener for function 'detect_x' was unable to start` | The hub named in `sources.yaml` doesn't exist in that namespace, or the connection setting is wrong or missing. See below. |
+| `ValueError: config/sources.yaml: namespace ... has unknown key(s)` / `source ... has unknown key(s)` | A typo in `sources.yaml`. The message names the key. |
+| `ValueError: ... every namespace needs a namespace:` / `every source needs a hub:` | A `sources.yaml` block missing `namespace:` or `hub:`. |
+| `ValueError: ... would both become the Azure function ...` | Two sources resolve to the same `detect_<namespace>_<hub>` name — usually the same hub added twice, or two functions on one hub with no distinct `consumer_group:`. |
+| `The listener for function 'detect_x_y' was unable to start` | The hub named in `sources.yaml` doesn't exist in that namespace, or the namespace's connection setting is wrong or missing. See below. |
 | Nothing at all | Python version mismatch. The app must be **Python 3.11** (Settings → Configuration → Stack). |
 
 Catch every one of these before deploying:
@@ -110,28 +111,34 @@ the diagnostic setting or the sender, not pyre.
 **2. Does the hub name match exactly?** `/health` lists each source's `hub`.
 Compare it character by character with the hub in the portal.
 
-**3. Is the connection setting right?** The name in `sources.yaml` (`connection:`,
-default `EVENTHUB_CONNECTION`) must exist as an app setting, in one of two
-shapes:
+**3. Is the connection setting right?** Every hub's `connection` is derived from
+its `namespace:` label in `sources.yaml` — `namespace: network` needs
+`EVENTHUB_NETWORK`, not a hand-typed name. `/health` shows an empty
+`eventhub_settings` list when every namespace resolves; a non-empty one names
+exactly which namespace's setting is missing or mismatched. The setting itself
+exists as an app setting in one of two shapes:
 
 ```
 # connection string
-EVENTHUB_CONNECTION = Endpoint=sb://<ns>.servicebus.windows.net/;SharedAccessKeyName=...
+EVENTHUB_NETWORK = Endpoint=sb://<ns>.servicebus.windows.net/;SharedAccessKeyName=...
 
 # or identity-based (preferred - no secret)
-EVENTHUB_CONNECTION__fullyQualifiedNamespace = <ns>.servicebus.windows.net
-EVENTHUB_CONNECTION__credential              = managedidentity
+EVENTHUB_NETWORK__fullyQualifiedNamespace = <ns>.servicebus.windows.net
+EVENTHUB_NETWORK__credential              = managedidentity
 ```
 
 A connection string scoped to a *specific hub* (`;EntityPath=...`) only works for
-that hub. Use a namespace-level one.
+that hub. Use a namespace-level one. Full add-a-namespace steps:
+[adding-a-log-source.md](adding-a-log-source.md).
 
 **4. Identity-based? Check the role.** The Function App's identity needs **Azure
 Event Hubs Data Receiver** on the namespace. Up to 5 minutes to apply.
 
 **5. Is something else already consuming `$Default`?** Two consumers on one
 consumer group fight over the lease. Create a consumer group for pyre and name it
-in `sources.yaml` (`consumer_group: pyre`).
+in `sources.yaml` (`consumer_group: pyre`) — `load_sources()` will refuse the
+config if that collides with another source's function name instead of
+silently registering both.
 
 **6. Diagnostic logs are batched by Azure**, up to ~5 minutes from event to
 delivery. Slow is not the same as broken.
