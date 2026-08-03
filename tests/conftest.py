@@ -1,7 +1,14 @@
-import os, sys
+import os
+import sys
 
-# The engine package (so tests can import pyre_engine.*).
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine"))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
 
-# The offline fake-DaC bundle used by tests (stands in for the external repo).
-SAMPLE_DAC = os.path.join(os.path.dirname(__file__), "fixtures", "sample_dac")
+DAC = os.path.join(REPO, "dac")
+__all__ = ["REPO", "DAC", "SAMPLES", "sample_messages"]
+SAMPLES = os.path.join(REPO, "tools", "samples", "eventhub_diagnostic.jsonl")
+
+
+def sample_messages():
+    with open(SAMPLES, encoding="utf-8") as fh:
+        return [ln.strip() for ln in fh if ln.strip()]

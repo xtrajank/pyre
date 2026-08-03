@@ -1,19 +1,13 @@
-# secrets & state - never commit
-*.tfvars
-!*.tfvars.example
-.terraform/
-*.tfstate
-*.tfstate.*
+# never commit
 .env
 local.settings.json
+
 # python
 __pycache__/
 *.pyc
 .venv/
-*.__pycache__/
-# build artifacts / pulled DaC bundle (detections live in an external repo)
-engine/registry_index.json
+.pytest_cache/
+
+# build output (dac/publish.py writes here; the bundle lives in Blob)
 dist/
-bundle/
 .bundle/
-.bundle.src/

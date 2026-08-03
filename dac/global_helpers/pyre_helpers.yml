@@ -1,0 +1,8 @@
+AnalysisType: global
+GlobalID: pyre_helpers
+Filename: pyre_helpers.py
+Description: >
+  Shared helpers any detection in this repo can import by bare name -
+  `from pyre_helpers import private_ip`. The paired YAML with
+  `AnalysisType: global` is what puts this folder on the engine's import path;
+  a .py without one is invisible.

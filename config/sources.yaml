@@ -1,34 +1,36 @@
-# Declarative log sources. IaC reads this to size Event Hubs; the engine reads
-# the configured log-type field (Terraform var log_type_field, default
-# "dataset") off each event at runtime. Add a source = add an entry here.
-# Give high-volume sources their own hub + more partitions to isolate scaling.
+# Every log source pyre ingests. One entry = one Event Hub = one function.
+# Add as many as you like; there is no code to change and no limit.
+#
+# Only `hub:` is required. Everything else defaults to the shape Azure
+# diagnostic settings emit, which is what streams out of any Azure resource:
+#
+#   connection:        EVENTHUB_CONNECTION   app setting holding the connection
+#   consumer_group:    $Default
+#   log_type_field:    category              THE field that selects detections
+#   event_time_field:  time                  the record's own timestamp
+#   envelope_field:    records               array field when one message holds many
+#
+# log_type_field is the one to get right. Its value on each record must equal a
+# detection's `LogTypes:` entry EXACTLY - it is case-sensitive, and a mismatch
+# looks exactly like "the engine isn't working". Check yours in the portal:
+# Event Hubs Namespace -> your hub -> Data Explorer -> View events -> Body.
+#
+# Sources in another namespace name a different `connection:` app setting.
+# Two functions reading the same hub need different `consumer_group:` values.
 
 sources:
-  # The POC's single source (docs/poc/README.md). The hub already exists - it was
-  # created by hand, not by this file - so this entry is here to declare the log
-  # type the POC detections route on, which is what `pyre validate` checks
-  # against. Change `log_types` if you point the POC at a different feed.
-  - name: poc
-    log_types: [AWS.CloudTrail]
-    hub: logs-in
-    partitions: 2
-    retention_hours: 24
+  # The POC's hub. Azure diagnostic logs about the Event Hub namespace itself,
+  # so the hub feeds itself and you can demo without any external log source.
+  - hub: logs-in
 
-  - name: palo_traffic
-    log_types: [SEC_Network_Palo_Alto_Traffic]
-    hub: palo-traffic-in            # dedicated hub: isolates Palo's firehose
-    partitions: 32                  # parallelism ceiling for this source
-    retention_hours: 24
-
-  - name: cloudflare
-    log_types: [SEC_Web_Cloudflare]
-    hub: cloudflare-in
-    partitions: 16
-    retention_hours: 24
-
-  # Everything lower-volume can share one hub.
-  - name: shared_default
-    log_types: [SEC_XDR_AgentsInfo, SEC_Auth_Entra_Signin]
-    hub: default-logs-in
-    partitions: 8
-    retention_hours: 24
+  # More sources look like this. Delete or edit as you onboard real feeds.
+  #
+  # - hub: insights-logs-signinlogs
+  #   log_type_field: category
+  #   event_time_field: time
+  #
+  # - hub: palo-traffic-in
+  #   connection: EVENTHUB_CONNECTION_NETWORK   # a different namespace
+  #   log_type_field: dataset                   # a normalizer's own field
+  #   event_time_field: _time
+  #   envelope_field: ""                        # one message = one record
