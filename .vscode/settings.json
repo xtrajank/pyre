@@ -1,0 +1,13 @@
+{
+  // The repo root IS the Function App root, so "Deploy to Function App..." on
+  // this folder deploys the right thing with no packaging step.
+  "azureFunctions.projectLanguage": "Python",
+  "azureFunctions.projectRuntime": "~4",
+  "azureFunctions.deploySubpath": ".",
+  "azureFunctions.pythonVenv": ".venv",
+  // Build dependencies on the Linux worker from requirements.txt rather than
+  // uploading them. Smaller upload, and always the right wheels.
+  "azureFunctions.scmDoBuildDuringDeployment": true,
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": ["tests"]
+}

@@ -1,0 +1,10 @@
+# Installed on the Linux worker at deploy time. Keep this short - every entry is
+# build time on every deploy.
+azure-functions
+azure-identity
+azure-storage-blob
+pyyaml
+requests
+
+# Only imported when REDIS_HOST is set (production shared state).
+redis>=5.0

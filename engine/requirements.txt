@@ -1,7 +1,0 @@
-azure-functions
-azure-identity
-azure-eventhub
-azure-storage-blob
-redis>=5.0
-pyyaml
-requests

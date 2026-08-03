@@ -1,4 +1,0 @@
-AnalysisType: global
-GlobalID: pyre_shared
-Filename: pyre_shared.py
-Description: Shared helper functions importable across detections (test fixture).

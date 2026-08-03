@@ -1,3 +1,0 @@
-env: dev
-cost_profile: test
-default_routes: [mock]

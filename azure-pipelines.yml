@@ -1,0 +1,81 @@
+# Deploy the engine from Azure DevOps. Optional - VS Code and the portal deploy
+# the same thing - but this is the one that doesn't need anyone's laptop, and it
+# is the answer to "our IP changed" and "who deployed this?".
+#
+# SETUP (once):
+#   1. Push this repo to Azure Repos.
+#   2. Pipelines -> New -> Azure Repos Git -> this repo -> Existing YAML file.
+#   3. Set the variables below.
+#   4. Project settings -> Service connections -> new Azure Resource Manager
+#      connection per environment, named to match `azureSubscription`.
+#   5. Pipelines -> Environments -> new environment `prod` -> Approvals and
+#      checks -> add yourself. That's what makes prod a decision, not a push.
+#
+# The build agent has a fixed set of outbound IPs that are not your laptop's, so
+# if the Function App restricts inbound access you either add the agent's range
+# or use a self-hosted agent inside the network. See docs/troubleshooting.md.
+
+trigger:
+  branches:
+    include: [main]
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  azureSubscription: pyre-dev      # ARM service connection name
+  devAppName: pyre-dev             # Function App name
+  prodAppName: pyre-prod
+
+stages:
+  - stage: test
+    jobs:
+      - job: test
+        steps:
+          - task: UsePythonVersion@0
+            inputs: { versionSpec: "3.11" }
+          - script: pip install -r requirements.txt pytest fakeredis
+            displayName: install
+          - script: python -m pytest tests -q
+            displayName: tests
+
+  - stage: dev
+    dependsOn: test
+    jobs:
+      - job: deploy_dev
+        steps:
+          - task: UsePythonVersion@0
+            inputs: { versionSpec: "3.11" }
+          - task: AzureFunctionApp@2
+            displayName: deploy to dev
+            inputs:
+              connectedServiceNameARM: $(azureSubscription)
+              appType: functionAppLinux
+              appName: $(devAppName)
+              package: $(System.DefaultWorkingDirectory)
+              runtimeStack: "PYTHON|3.11"
+              # Build dependencies on the worker from requirements.txt, the same
+              # as a VS Code deploy. Do not vendor packages into the repo.
+              appSettings: -SCM_DO_BUILD_DURING_DEPLOYMENT true -ENABLE_ORYX_BUILD true
+
+  - stage: prod
+    dependsOn: dev
+    jobs:
+      - deployment: deploy_prod
+        environment: prod          # attach an approval check to this
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: UsePythonVersion@0
+                  inputs: { versionSpec: "3.11" }
+                - task: AzureFunctionApp@2
+                  displayName: deploy to prod
+                  inputs:
+                    connectedServiceNameARM: $(azureSubscription)
+                    appType: functionAppLinux
+                    appName: $(prodAppName)
+                    package: $(System.DefaultWorkingDirectory)
+                    runtimeStack: "PYTHON|3.11"
+                    appSettings: -SCM_DO_BUILD_DURING_DEPLOYMENT true -ENABLE_ORYX_BUILD true

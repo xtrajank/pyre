@@ -1,0 +1,25 @@
+# The metadata half of a detection. Its `.py` MUST sit in this same folder.
+AnalysisType: rule
+Filename: eventhub_auth_failure.py
+RuleID: "Azure.EventHub.AuthFailure"
+DisplayName: "Repeated Event Hub Authorization Failures"
+Enabled: true
+Severity: Medium
+
+# THE FIELD THAT MATTERS. Whatever the source's `log_type_field` names on an
+# incoming record must equal one of these strings EXACTLY - it is
+# case-sensitive. For Azure diagnostic logs that field is the record's category.
+LogTypes:
+  - RuntimeAuditLogs
+
+Threshold: 3              # matches sharing a dedup string before an alert fires
+DedupPeriodMinutes: 60    # how long one alert covers repeats
+
+Description: Three or more failed Event Hubs authorization attempts from one client.
+Runbook: >
+  Check whether the client IP and identity are expected senders/receivers for
+  this namespace. Repeated failures usually mean a stale SAS key or an identity
+  that lost its role assignment - but they look exactly like probing too.
+Tags:
+  - Azure
+  - EventHub

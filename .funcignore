@@ -1,0 +1,22 @@
+# What NOT to ship to the Function App. Everything else in this repo is the
+# deployment: function_app.py, host.json, requirements.txt, pyre_engine/ and
+# config/ are the app root, exactly as-is.
+.git*
+.vscode/
+.claude/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Not runtime code
+tests/
+docs/
+tools/
+dac/
+dist/
+README.md
+azure-pipelines.yml
+local.settings.json
+local.settings.json.example

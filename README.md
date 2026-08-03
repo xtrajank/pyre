@@ -1,72 +1,130 @@
 # pyre
 
-**pyre is the compute controller for a SIEM.** Logs stream in and pyre runs a library of **python-based detections** against those logs. When one matches it pushes and alert and a signal.
-
----
-
-1. **[docs/GLOSSARY.md](docs/GLOSSARY.md)** — every term used anywhere in this repo, in plain English. 10 minutes. Come back here after.
-2. **[docs/architecture.md](docs/architecture.md)** — the one-page "how it fits together and why," with the pipeline diagram.
-3. **[docs/PRODUCTION.md](docs/PRODUCTION.md)** — the complete master guide: architecture, every variable, spinning up dev **and** prod end to end, monitoring, debugging, scaling, spin-down, and a script for walking leadership through it. This is the one you *operate* from.
-4. **[docs/local-dev.md](docs/local-dev.md)** — the $0, no-Azure loop for developing/testing the engine and detections on your laptop.
-
-Then dip into a directory's own `README.md` (table below) when you need depth on that piece.
-
----
-
-## The mental model
+**A detection engine for Azure.** Logs arrive on Event Hubs, pyre routes each
+record to the Python detections that cover its log type, runs them, and writes a
+**signal** for every match and an **alert** for every match that clears its
+threshold and isn't a duplicate.
 
 ```
-   Logs from Okta, AWS,        pyre (this repo)                 A human
-   firewalls, Cloudflare…      ┌───────────────────────┐       gets a case
-        │                      │ 1. route by log type  │          ▲
-        ▼                      │ 2. run the detections │          │
-   ┌─────────┐  cleaned up   ┌─┴─ 3. is this new?      │   ┌──────┴──────┐
-   │  Cribl  │──────────────▶│    (dedup, thresholds)  │──▶│    Torq     │
-   └─────────┘   & routed    │ 4. open a case          │   │ (case tool) │
-                             └───────────────────────┘   └─────────────┘
-        detections come from ▲
-        an external Git repo ─┘  (panther-analysis or your fork)
+  Event Hub(s)                 Function App "pyre"                Storage
+  ─────────────                ───────────────────                ───────
+  logs-in         ──┐          1. unwrap the message              detections/
+  signin-logs     ──┼────────▶ 2. read the source's                 current.json
+  palo-traffic    ──┘             log_type_field                    bundles/<v>.zip
+  ...unlimited                 3. run that log type's                  │
+                                  detections                    reads ─┘
+                               4. rule() true -> SIGNAL
+                               5. threshold + dedup                pyre-output/
+                               6. survives -> ALERT      writes ──▶  signals/<date>.jsonl
+                                                                     alerts/<date>.jsonl
 ```
 
-Full reasoning, and why each Azure piece was chosen to stay cheap at millions of logs/hour, is in [docs/architecture.md](docs/architecture.md).
+The detections are **not in this repo**. They live in their own git repo which
+publishes a versioned bundle to Blob storage; workers reload it within a minute,
+with no redeploy. See [dac/](dac/) for a starter you can copy.
 
----
+## Guides
 
-## Repository map
+| | |
+|---|---|
+| **[docs/poc.md](docs/poc.md)** | Stand up the POC in the portal. One hub, one storage account, alerts in a blob you can read. ~30 minutes. |
+| **[docs/dev.md](docs/dev.md)** | A second environment where changes get tested before they touch prod. |
+| **[docs/prod.md](docs/prod.md)** | All log sources, shared state, a real SIEM destination, and the deploy pipeline. |
+| **[docs/troubleshooting.md](docs/troubleshooting.md)** | Deployment 403s, empty function lists, and "why no alerts?". |
+| **[dac/README.md](dac/README.md)** | Writing and publishing detections. |
 
-Each directory has its own `README.md` that goes deep on that topic. Start at the top row and work down as needed.
+## What's in here
 
-| Directory | What lives here | Read its README when you want to… |
+```
+function_app.py          the triggers - this repo root IS the Function App root
+host.json                runtime settings (batch size)
+requirements.txt
+config/sources.yaml      every log source, and how to read each one
+pyre_engine/             the engine
+  config.py                app settings + sources.yaml
+  processor.py             the batch loop: route -> rule() -> signal -> alert
+  registry.py              detections, indexed by log type
+  bundle.py                where the detection bundle comes from
+  state.py                 dedup / thresholds / redelivery guard
+  sinks.py                 where signals and alerts go
+  records.py               what a signal and an alert look like
+  event.py                 the object rule() receives
+dac/                     a starter detections repo - copy into its own repo
+tools/run_local.py       run the whole engine on your laptop, no Azure
+tests/
+azure-pipelines.yml      optional: deploy from Azure DevOps
+```
+
+## Try it right now, with no Azure
+
+```powershell
+pip install -r requirements.txt
+python tools/run_local.py
+```
+
+```
+bundle    ...\dac
+          1 detection(s) covering ['RuntimeAuditLogs']
+routing   'Category' on each record
+input     3 message(s) from ...\tools\samples\eventhub_diagnostic.jsonl
+
+SIGNALS  4   (one per rule() that returned True)
+    held   Azure.EventHub.AuthFailure          eh-auth-failure:203.0.113.55
+    held   Azure.EventHub.AuthFailure          eh-auth-failure:203.0.113.55
+  ->alert  Azure.EventHub.AuthFailure          eh-auth-failure:203.0.113.55
+    held   Azure.EventHub.AuthFailure          eh-auth-failure:198.51.100.77
+
+ALERTS   1   (matches that also cleared Threshold and dedup)
+           [Medium] Event Hub authorization failures from 203.0.113.55 on logs-in
+```
+
+Four matches, one alert. That gap — thresholds and dedup — is the difference
+between a detection platform and a grep loop, and it is the same code that runs
+in Azure. Point it at your own detections and your own logs:
+
+```powershell
+python tools/run_local.py --bundle ..\my-detections --file my-logs.json --log-type-field Category
+```
+
+## The whole configuration surface
+
+**Per source** — [config/sources.yaml](config/sources.yaml), one entry per Event
+Hub, any number of them. Only `hub:` is required:
+
+```yaml
+sources:
+  - hub: logs-in                 # defaults: category / time / records envelope
+  - hub: palo-traffic-in
+    connection: EVENTHUB_CONNECTION_NETWORK
+    log_type_field: dataset
+    event_time_field: _time
+    envelope_field: ""
+```
+
+**Per environment** — app settings in the portal:
+
+| Setting | What it does |
+|---|---|
+| `EVENTHUB_CONNECTION` | Event Hub auth. Extra namespaces get their own setting, named in `sources.yaml`. |
+| `DAC_BLOB_ACCOUNT_URL` | `https://<account>.blob.core.windows.net` holding the published detections. Empty = read `DAC_LOCAL_DIR` off disk. |
+| `DAC_CONTAINER` | default `detections` |
+| `DAC_REFRESH_SECONDS` | default `60` — how fast a published detection goes live |
+| `OUTPUT_BLOB_ACCOUNT_URL` | write signals/alerts to blobs you can read in the portal |
+| `OUTPUT_BLOB_CONTAINER` | default `pyre-output` |
+| `OUTPUT_HTTP_URL` | POST signals/alerts to a SIEM instead. Wins over the blob. |
+| `ALERT_WEBHOOK_URL` | optional: also POST each alert to a case tool |
+| `REDIS_HOST` | set it and dedup state is shared across workers (production). Unset = in-process. |
+| `STORM_LIMIT` | max alerts per detection per hour, default `1000` |
+| `PYRE_ENV` | a label shown by `/health` |
+
+That's all of it. There is no mode switch to get wrong: setting
+`DAC_BLOB_ACCOUNT_URL` is what picks Blob, setting `REDIS_HOST` is what picks
+shared state.
+
+## The three functions
+
+| Function | Trigger | Purpose |
 |---|---|---|
-| [docs/](docs/) | All the guides (glossary, architecture, deploy runbook, security) | understand a concept or run a procedure |
-| [config/](config/README.md) | Plain-text settings: which repo the detections come from, where logs arrive, where alerts go | onboard a log source, change a destination, point at a detections repo |
-| [engine/](engine/README.md) | The actual detection processor (the Python that runs the rules) | understand or change how detections are executed |
-| [cli/](cli/README.md) | The `pyre` command-line tool (`pull`, `build`, `publish`, `deploy`…) | pull detections, publish them, or deploy |
-| [infra/](infra/README.md) | Terraform — the code that creates the Azure resources | create/change/destroy the cloud environment |
-| [detections/](detections/README.md) | A signpost — real detections live in an **external** repo | learn where detections live and how they reach the engine |
-| [tests/](tests/README.md) | Automated tests for the engine and detections | run the tests or add one |
-| [tools/](tools/README.md) | Test-lab helpers: run it locally, ship sample logs, a fake alert sink | test on your laptop or feed sample data |
-
----
-
-## Pointers
-
-- **See it work on your laptop ($0, no Azure):** [docs/local-dev.md](docs/local-dev.md) — `python tools/testlab/run_local.py`.
-- **Deploy an environment (dev or prod) to Azure:** [docs/PRODUCTION.md § 9](docs/PRODUCTION.md#9-spin-up-cloud) — provision, deploy the engine, publish detections, connect Cribl + Torq.
-- **Add or change a detection:** edit it in your external detections repo and `git push` — pyre hot-reloads it within ~a minute. See [detections/README.md](detections/README.md).
-- **Shut it all down:** `terraform destroy` — [docs/PRODUCTION.md § 17](docs/PRODUCTION.md#17-spinning-down).
-
----
-
-## What's built
-
-- **Built and tested:** the detection engine (routing → rule → signal → dedup/threshold → alert → dispatch), the external-DaC bundle loading + hot-reload, the local test runner, and the Terraform — **one composition you stamp out as dev/prod instances** (validates).
-- **Structurally there, not yet exercised end-to-end on real Azure:** the CI publish-to-Blob pipeline, and a first cloud `apply` (the Terraform validates but hasn't been applied — expect to debug SKU/region/quota specifics on a free trial).
-- **Deliberately out of scope for now:** log normalization (that's Cribl's job), scheduled-query detections, correlation rules, the AI triage agent, and a search UI. The architecture leaves clean seams for each — see [docs/architecture.md](docs/architecture.md) and [PANTHER_CONVERSION.md](PANTHER_CONVERSION.md).
-
-## Design principles
-
-- **Cheap at scale:** batch everything; one Azure Function execution evaluates hundreds of logs; scale to zero when idle.
-- **No secrets in code:** every service is reached by identity (Managed Identity) or Key Vault reference, never a password in a file.
-- **Modular:** add a log source or an alert destination by editing config, not code; replace any Terraform module without touching the others.
-- **Detections stay portable:** they're plain code in their own repo.
+| `detect_<hub>` | Event Hub, batched | The one that matters. One per source in `sources.yaml`. |
+| `health` | GET | Which bundle loaded, how many detections, which log types, which field each source routes on. |
+| `ingest` | POST | Feed logs straight in, bypassing Event Hubs. Isolates the detection half when you're working out which half is broken. |

@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "Copy to local.settings.json (gitignored) to run the Function App locally",
+    "with VS Code / Core Tools. Not needed for `python tools/run_local.py`,",
+    "which needs nothing at all.",
+    "",
+    "In Azure these same names are App settings: Function App ->",
+    "Settings -> Environment variables -> App settings."
+  ],
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+
+    "PYRE_ENV": "local",
+
+    "EVENTHUB_CONNECTION": "<Event Hub namespace connection string>",
+
+    "DAC_BLOB_ACCOUNT_URL": "",
+    "DAC_LOCAL_DIR": "./dac",
+
+    "OUTPUT_BLOB_ACCOUNT_URL": "",
+    "OUTPUT_HTTP_URL": ""
+  }
+}
