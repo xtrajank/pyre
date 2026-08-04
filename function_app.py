@@ -21,7 +21,7 @@ from typing import List
 
 import azure.functions as func
 
-from pyre_engine.config import RuntimeConfig, check_eventhub_settings
+from pyre_engine.config import RuntimeConfig, check_eventhub_settings, identity_state
 from pyre_engine.processor import Processor
 
 log = logging.getLogger("pyre.host")
@@ -94,6 +94,11 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
     `eventhub_settings` covers the OTHER most common setup failure: a
     namespace whose app setting was never created, or was created with a name
     that doesn't match `sources.yaml`. Empty means every namespace resolves.
+
+    `identity` is what to read FIRST when this returns 503 with a
+    `DefaultAzureCredential` error: `endpoint: false` means the app has no
+    managed identity at all, which breaks the bundle, the output blob and the
+    Event Hub triggers together and looks like three separate faults.
     """
     body = {
         "env": _config.env,
@@ -108,6 +113,7 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
             for s in _config.sources
         ],
         "eventhub_settings": check_eventhub_settings(_config.sources),
+        "identity": identity_state(),
     }
     try:
         registry = _processor.loader.get()

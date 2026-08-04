@@ -189,6 +189,33 @@ def check_eventhub_settings(sources: list[Source]) -> list[str]:
     return problems
 
 
+def identity_state() -> dict:
+    """What `DefaultAzureCredential` has to work with, reported next to the
+    thing it breaks.
+
+    Everything the engine touches in Azure - the DAC bundle, the output blob,
+    the Event Hub trigger - authenticates as the app's managed identity, so
+    "no identity" surfaces three unrelated-looking failures at once. It is also
+    the one failure the exception text doesn't name: `DefaultAzureCredential
+    failed to retrieve a token` reads identically whether the identity is off,
+    or is on and pinned to a client id that isn't attached to this app.
+
+    `endpoint` is the platform's own signal: Azure injects IDENTITY_ENDPOINT
+    only once an identity is assigned, so False means Settings -> Identity,
+    not RBAC. A missing ROLE fails later and differently (a 403 naming the
+    action), which is why that isn't checked here.
+
+    `azure_client_id` pins every credential in the app to ONE user-assigned
+    identity - correct when the app has several, and a total outage when it
+    holds a stale or unattached id. Reported always, because "set to the wrong
+    thing" and "not set" look the same from the outside.
+    """
+    return {
+        "endpoint": bool(_env("IDENTITY_ENDPOINT") or _env("MSI_ENDPOINT")),
+        "azure_client_id": _env("AZURE_CLIENT_ID") or None,
+    }
+
+
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 

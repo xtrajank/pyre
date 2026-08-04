@@ -24,6 +24,15 @@ your Function App → **Review + assign**.
 That's the only permission this namespace needs, and it's read-only. Up to 5
 minutes to apply.
 
+> **User-assigned identity?** Check which kind you have — the Identity blade has
+> two tabs, and this is the one thing that changes on every step below. If
+> **System assigned** is Off and the identity lives under **User assigned**,
+> then in the picker above choose subtype **User-assigned managed identity** and
+> select *the identity*, not the Function App. Selecting the Function App there
+> assigns the role to a system-assigned identity that doesn't exist, and the
+> assignment silently covers nothing. Step 2 then needs one extra setting, and
+> [poc.md](poc.md) step 2's storage role needs the same treatment.
+
 ### 2. Pick a namespace label and add the app settings
 
 The label is yours — short, and it only has to be unique within
@@ -37,9 +46,17 @@ twice:
 |---|---|
 | `EVENTHUB_<LABEL>__fullyQualifiedNamespace` | `<your-namespace>.servicebus.windows.net` |
 | `EVENTHUB_<LABEL>__credential` | `managedidentity` |
+| `EVENTHUB_<LABEL>__clientId` | **user-assigned identities only** — the identity's Client ID |
 
-**Apply**, confirm the restart. Neither value is a secret — there is nothing
+**Apply**, confirm the restart. None of these is a secret — there is nothing
 here to rotate, leak, or put in a vault.
+
+`__clientId` is per connection because the host resolves each connection's
+identity independently; the app-wide `AZURE_CLIENT_ID` is the *worker's* and
+does not reach the triggers. Omit it on a system-assigned app, where there is
+only one identity to mean. Get the value from Function App → **Settings →
+Identity → User assigned** → the identity → **Overview → Client ID** — the same
+value for every namespace, since it's the identity being named, not the hub.
 
 ### 3. Add the block to `sources.yaml`
 
