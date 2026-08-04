@@ -99,6 +99,12 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
     `DefaultAzureCredential` error: `endpoint: false` means the app has no
     managed identity at all, which breaks the bundle, the output blob and the
     Event Hub triggers together and looks like three separate faults.
+
+    What this CANNOT tell you is whether the Event Hub listeners actually
+    attached. The listener lives in the Functions host, not in this worker
+    process: `status: ok` means every trigger's config is sound, not that any of
+    them is connected. That's a separate check, and
+    docs/troubleshooting.md#is-the-trigger-actually-listening is where it lives.
     """
     body = {
         "env": _config.env,
@@ -107,7 +113,13 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
                   (f"{_config.output_blob_account_url}/{_config.output_blob_container}"
                    if _config.output_blob_account_url else None),
         "sources": [
+            # `connection` and `consumer_group` are what the HOST binds with, and
+            # neither is typed in sources.yaml - one is derived from `namespace`,
+            # the other defaults. Reporting them is what turns "which app setting
+            # does this trigger actually want?" and "which consumer group is it
+            # claiming?" into something you can read instead of derive.
             {"namespace": s.namespace, "hub": s.hub, "function": s.function_name,
+             "connection": s.connection, "consumer_group": s.consumer_group,
              "log_type_field": s.log_type_field,
              "event_time_field": s.event_time_field, "envelope_field": s.envelope_field or None}
             for s in _config.sources

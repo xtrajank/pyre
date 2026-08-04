@@ -66,7 +66,11 @@ branch to dev from VS Code exactly as in
 
 1. `/health` — three functions, right bundle, right `log_type_field` per source.
 2. `ingest` a known payload — the signals and alerts you expect appear.
-3. Send through the real hub — the trigger fires and checkpoints.
+3. Confirm the listener attached — `azure-webjobs-eventhub` in the storage
+   account has a live `ownership/` blob for each hub
+   ([how, and what else to check](troubleshooting.md#is-the-trigger-actually-listening)).
+   `/health` reports configuration, not connections, so this is a separate step.
+4. Send through the real hub — the trigger fires and checkpoints.
 
 Only then merge to `main`.
 

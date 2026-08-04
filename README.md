@@ -138,5 +138,10 @@ shared state.
 | Function | Trigger | Purpose |
 |---|---|---|
 | `detect_<namespace>_<hub>` | Event Hub, batched | The one that matters. One per source in `sources.yaml`. |
-| `health` | GET | Which bundle loaded, how many detections, which log types, which field each source routes on. |
+| `health` | GET | Which bundle loaded, how many detections, which log types, which field each source routes on, and which app setting + consumer group each trigger binds with. |
 | `ingest` | POST | Feed logs straight in, bypassing Event Hubs. Isolates the detection half when you're working out which half is broken. |
+
+`/health` reports *configuration*, not connections: a trigger it calls healthy
+may never have attached to its hub. Whether the app is really listening is a
+host-side fact, and the checks for it are in
+[troubleshooting § Is the trigger actually listening?](docs/troubleshooting.md#is-the-trigger-actually-listening).

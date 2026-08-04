@@ -24,6 +24,11 @@ your Function App → **Review + assign**.
 That's the only permission this namespace needs, and it's read-only. Up to 5
 minutes to apply.
 
+The trigger also writes its checkpoints to the app's own storage account, so it
+depends on **Storage Blob Data Contributor** there too — already granted in
+[poc.md step 2](poc.md#step-2--give-the-function-app-access-to-that-storage),
+and nothing to repeat per namespace.
+
 > **User-assigned identity?** Check which kind you have — the Identity blade has
 > two tabs, and this is the one thing that changes on every step below. If
 > **System assigned** is Off and the identity lives under **User assigned**,
@@ -37,7 +42,17 @@ minutes to apply.
 
 The label is yours — short, and it only has to be unique within
 `sources.yaml`. It becomes both the app-setting name and part of every
-function name it covers, e.g. `network` → `EVENTHUB_NETWORK`.
+function name it covers, e.g. `network` → `EVENTHUB_NETWORK`. Anything that
+isn't a letter or digit becomes `_` on the way (`pyre-evnthub` →
+`EVENTHUB_PYRE_EVNTHUB`), since neither an app-setting name nor an Azure
+function name can hold a hyphen.
+
+**That rewriting applies to the setting's name, never to its value.** The
+`__fullyQualifiedNamespace` below is the literal hostname from Event Hubs
+Namespace → **Overview → Host name**, hyphens intact
+(`pyre-evnthub.servicebus.windows.net`). Nor does the label have to equal the
+real namespace's resource name — it's a nickname, and only `sources.yaml` and
+the app settings ever see it.
 
 Function App → **Settings → Environment variables → App settings** → **+ Add**,
 twice:
@@ -86,10 +101,20 @@ Deploy (VS Code, or your pipeline — see [prod.md § Deploying](prod.md#5-deplo
 Then `GET /health`:
 
 - The new source appears under `sources`, with the `function` name it
-  registered as.
+  registered as, the `connection` app setting its trigger will look for, and the
+  `consumer_group` it will claim. Compare all three against what you created.
 - `eventhub_settings` is `[]`. Anything else names exactly which namespace's
   app setting is missing or mismatched — fix that before chasing anything
   else.
+
+**Then confirm the listener attached**, which `/health` cannot tell you — it
+reports configuration, not connections. Restart the app and check Storage
+account → **Containers → `azure-webjobs-eventhub`** for a new
+`<namespace>.servicebus.windows.net/<hub>/<consumer-group>/ownership/…` path,
+whose **Last modified** keeps advancing. That path is the host's own record that
+it authenticated, found the hub and claimed partitions. If it never appears,
+the log stream at startup names the reason:
+[troubleshooting § Is the trigger actually listening?](troubleshooting.md#is-the-trigger-actually-listening).
 
 Optionally prove the detection side before real traffic arrives:
 
@@ -122,7 +147,9 @@ away.
   mistype onto the wrong namespace.
 - **Two triggers on one hub.** If something else already consumes `$Default`
   on a hub, give your entry its own `consumer_group:` — `load_sources()`
-  refuses two sources that would otherwise land on the same function.
+  refuses two sources that would otherwise land on the same function. **Create
+  the consumer group first** (hub → **Entities → Consumer groups → + Consumer
+  group**): naming one that doesn't exist stops that trigger from starting.
 
-See [troubleshooting.md § The Event Hub trigger never fires](troubleshooting.md#the-event-hub-trigger-never-fires)
+See [troubleshooting.md § Is the trigger actually listening?](troubleshooting.md#is-the-trigger-actually-listening)
 if a source is deployed but nothing arrives.

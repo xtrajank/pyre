@@ -20,8 +20,8 @@ No engine code changes between them. That is the point of the split.
 | Resource | Sizing | Why |
 |---|---|---|
 | Event Hubs namespace | Standard. One hub per high-volume source, one shared hub for the long tail. Partitions = your parallelism ceiling: 32 for a firewall firehose, 2–8 for the rest. | Partitions cannot be reduced later, only increased. Size the loud ones generously. |
-| Function App | Linux, Python 3.11. **Premium (EP1)** or Flex Consumption. | Consumption cold-starts and caps out; a detection engine should stay warm. |
-| Storage account | Standard LRS. Containers `detections`, `pyre-output`. | |
+| Function App | Linux, Python 3.11. **Premium (EP1)** or Flex Consumption. | Consumption cold-starts and caps out; a detection engine should stay warm. On Premium *with VNet integration*, turn on **Runtime scale monitoring** or the scale controller can't see the hubs. On a Dedicated plan, **Always On** — without it the host idles and the Event Hub listeners die with it. |
+| Storage account | Standard LRS. Containers `detections`, `pyre-output`. | Also holds the triggers' checkpoints, in `azure-webjobs-eventhub` — created by the host, don't touch it. |
 | Azure Cache for Redis | Basic C0 is enough to start; Standard C1 for HA. | Shared dedup/threshold state. See below. |
 | Application Insights | | Where the engine's logs and metrics go. |
 | Log Analytics workspace | | Backs App Insights; query the logs with KQL. |
@@ -31,7 +31,7 @@ App's identity needs:
 
 | Scope | Role |
 |---|---|
-| Storage account | Storage Blob Data Contributor |
+| Storage account | Storage Blob Data Contributor — or **Storage Blob Data Owner** + Storage Queue/Table Data Contributor when `AzureWebJobsStorage` is itself identity-based, which is the shape to ask for. [Why](poc.md#if-your-host-storage-is-identity-based-too). |
 | Each Event Hubs namespace in `sources.yaml` | Azure Event Hubs Data Receiver |
 | Redis | Redis Data Owner (Data Access Configuration → add the identity) |
 
@@ -99,8 +99,12 @@ See [adding-a-log-source.md](adding-a-log-source.md) for the full walkthrough
    `sources.yaml`.
 4. Publish detections whose `LogTypes:` contain those exact values.
 5. Deploy. Check `/health`: the source appears, `eventhub_settings` is `[]`,
-   and its values are in `log_types`.
-6. Watch **Log stream** for `no detections are registered for these log-type
+   `connection` and `consumer_group` match what you created, and its values are
+   in `log_types`.
+6. Confirm the listener attached — a live `ownership/` blob for that hub in the
+   storage account's `azure-webjobs-eventhub` container. `/health` can't see
+   this; [these four checks can](troubleshooting.md#is-the-trigger-actually-listening).
+7. Watch **Log stream** for `no detections are registered for these log-type
    values` — that line names anything arriving with no coverage.
 
 ---

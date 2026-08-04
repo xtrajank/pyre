@@ -19,7 +19,10 @@
 # `namespace:` is a short label, not a resource name - it becomes both the
 # app-setting group the trigger authenticates with (EVENTHUB_<NAMESPACE>) and
 # part of the Azure function name, so it only has to be unique WITHIN this
-# file. Every hub listed under one namespace shares that one connection; there
+# file. Hyphens and dots in it become underscores in those two derived NAMES
+# (pyre-evnthub -> EVENTHUB_PYRE_EVNTHUB), because neither an app setting nor
+# an Azure function may contain one. That rewriting never touches the setting's
+# VALUE: __fullyQualifiedNamespace stays the literal hostname, hyphens and all. Every hub listed under one namespace shares that one connection; there
 # is no per-hub connection field to type (or mistype) at all. See
 # docs/adding-a-log-source.md for the full add-a-namespace runbook, including
 # the app settings and RBAC each one needs - never a connection string.

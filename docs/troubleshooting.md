@@ -2,6 +2,7 @@
 
 - [Deploy fails with 403, or "failed to fetch"](#deploy-fails-with-403-or-failed-to-fetch)
 - [The functions list is empty after a successful deploy](#the-functions-list-is-empty-after-a-successful-deploy)
+- [Is the trigger actually listening?](#is-the-trigger-actually-listening)
 - [The Event Hub trigger never fires](#the-event-hub-trigger-never-fires)
 - [`/health` says bundle-load-failed](#health-says-bundle-load-failed)
 - [Detections load but nothing ever alerts](#detections-load-but-nothing-ever-alerts)
@@ -86,7 +87,7 @@ registered. Azure reports this only in the log stream.
 | `ValueError: config/sources.yaml: namespace ... has unknown key(s)` / `source ... has unknown key(s)` | A typo in `sources.yaml`. The message names the key. |
 | `ValueError: ... every namespace needs a namespace:` / `every source needs a hub:` | A `sources.yaml` block missing `namespace:` or `hub:`. |
 | `ValueError: ... would both become the Azure function ...` | Two sources resolve to the same `detect_<namespace>_<hub>` name — usually the same hub added twice, or two functions on one hub with no distinct `consumer_group:`. |
-| `The listener for function 'detect_x_y' was unable to start` | The hub named in `sources.yaml` doesn't exist in that namespace, or the namespace's connection setting is wrong or missing. See below. |
+| `The listener for function 'detect_x_y' was unable to start` | Import worked; the *listener* didn't. The hub named in `sources.yaml` doesn't exist in that namespace, the consumer group doesn't exist, or the namespace's connection setting or role is wrong. The exception on the next line says which — [full checklist](#is-the-trigger-actually-listening). |
 | Nothing at all | Python version mismatch. The app must be **Python 3.11** (Settings → Configuration → Stack). |
 
 Catch every one of these before deploying:
@@ -100,9 +101,97 @@ three functions register.
 
 ---
 
+## Is the trigger actually listening?
+
+The question behind almost every "nothing is arriving", and neither the function
+list nor `/health` answers it. **A `detect_*` function appears in the portal
+because the Python code registered it, and `/health` returns `ok` when its
+configuration is sound** — both are true of a trigger that never opened a
+connection. The listener lives in the Functions **host**; `/health` runs in the
+Python **worker** and cannot see it.
+
+Four signals, cheapest first. The first two are usually enough.
+
+### 1. The log stream, at startup
+
+**Monitoring → Log stream**, then **Overview → Restart**, then read the first
+~20 lines. Listeners start at host startup, so this is the only window in which
+they say anything.
+
+There is no positive "now listening" line to wait for. What you are looking for
+is this line **not** appearing:
+
+```
+The listener for function 'Functions.detect_poc_logs_in' was unable to start.
+```
+
+When it does appear, the exception right after it names the cause — a missing
+`EVENTHUB_*` setting, a hub that doesn't exist in that namespace, a consumer
+group that doesn't exist, or `Unauthorized`/`ClaimNotFound` for a missing role.
+Same lines, queryable after the fact:
+
+```kusto
+traces | where message contains "listener" | order by timestamp desc
+```
+
+### 2. The checkpoint blobs — the definitive proof
+
+The Event Hubs extension keeps its partition ownership and checkpoints in the
+app's own storage account (`AzureWebJobsStorage`). Storage account →
+**Containers** → **`azure-webjobs-eventhub`**:
+
+```
+<namespace>.servicebus.windows.net/<hub>/<consumer-group>/ownership/<partition>
+<namespace>.servicebus.windows.net/<hub>/<consumer-group>/checkpoint/<partition>
+```
+
+| What you see | What it means |
+|---|---|
+| No container at all | No listener has ever attached. Start at 1. |
+| No `azure-webjobs-eventhub`, but `azure-webjobs-hosts` and `azure-webjobs-secrets` **are** there | The most informative version of the above. Those two are created by the host with the same storage connection, so storage access and container creation are proven working — **the fault is on the Event Hubs side**, not storage. Go to [the trigger never fires](#the-event-hub-trigger-never-fires) and work checks 2–5. (Confirm the blobs inside `azure-webjobs-hosts` have recent timestamps, in case they predate a switch to identity-based storage.) |
+| `ownership/` blobs, **Last modified** ticking over | Connected and holding partitions. **It is listening.** |
+| `ownership/` but no `checkpoint/` | Connected, but no event has been processed yet — the hub is empty or nothing has been delivered. Not a fault. |
+| `checkpoint/` present, timestamps frozen | It was listening and stopped. Usually the app was stopped or scaled to zero, or the identity's role was removed. |
+| Folders for a hub/consumer group you don't recognize | An old `sources.yaml` entry, or another app sharing this storage account. Harmless, but it's why the paths are worth reading. |
+
+This is the storage account the app was created with. If `AzureWebJobsStorage`
+is **identity-based** (`__blobServiceUri` + `__credential` rather than a
+connection string), the documented minimum for the Event Hub trigger's
+checkpoints is **Storage Blob Data Owner** — the same role that connection
+needs in its own right — plus **Storage Queue Data Contributor** and **Storage
+Table Data Contributor** to match `__queueServiceUri` / `__tableServiceUri`.
+See [poc.md § If your host storage is identity-based too](poc.md#if-your-host-storage-is-identity-based-too).
+
+### 3. The namespace's own metrics
+
+Event Hubs Namespace → **Monitoring → Metrics**:
+
+| Metric | Reads as |
+|---|---|
+| `ActiveConnections` | above zero once the listener connects (namespace-wide, so shared with senders) |
+| `Outgoing Messages`, split by **Entity name** | someone is *reading* that hub |
+| `Incoming Messages` with no outgoing | data is arriving and nobody is consuming it — the exact shape of "not listening" |
+
+### 4. Invocations
+
+Function App → **Overview → Functions → `detect_<ns>_<hub>` → Monitor**, or:
+
+```kusto
+requests | where name startswith "detect_" | order by timestamp desc
+```
+
+A row here is proof the whole path worked, end to end. If rows appear but no
+signals do, listening was never the problem — skip to
+[detections load but nothing ever alerts](#detections-load-but-nothing-ever-alerts).
+
+---
+
 ## The Event Hub trigger never fires
 
-`/health` is fine, `ingest` produces signals, but real logs never arrive.
+`/health` is fine, `ingest` produces signals, but real logs never arrive. Run
+[the four checks above](#is-the-trigger-actually-listening) first — they split
+this into "never connected" and "connected but nothing to read", which have no
+causes in common. Then:
 
 **1. Is the hub receiving anything?** Event Hubs Namespace → your hub → **Data
 Explorer → View events**. Nothing there means the problem is upstream — check
@@ -134,13 +223,39 @@ that hub. Use a namespace-level one. Full add-a-namespace steps:
 **4. Identity-based? Check the role.** The Function App's identity needs **Azure
 Event Hubs Data Receiver** on the namespace. Up to 5 minutes to apply.
 
-**5. Is something else already consuming `$Default`?** Two consumers on one
-consumer group fight over the lease. Create a consumer group for pyre and name it
-in `sources.yaml` (`consumer_group: pyre`) — `load_sources()` will refuse the
-config if that collides with another source's function name instead of
-silently registering both.
+**5. Does the consumer group exist?** `$Default` always does; anything you named
+in `consumer_group:` has to be created by hand — Event Hubs Namespace → your hub
+→ **Entities → Consumer groups → + Consumer group**, spelled identically.
+Naming one that doesn't exist fails the listener at startup, with the error in
+check 1 above. `/health` → `sources[].consumer_group` shows what each trigger
+will ask for.
 
-**6. Diagnostic logs are batched by Azure**, up to ~5 minutes from event to
+**6. Is something else already consuming that consumer group?** Two consumers on
+one group steal partitions from each other and *both* miss events — including a
+laptop running the app locally against the same hub. Give each its own consumer
+group (`consumer_group: pyre`); `load_sources()` refuses two sources that would
+collide on the same function name rather than silently registering both.
+
+**7. Is the app actually running?** **Overview → Status** must be *Running*, not
+Stopped. And a function can be individually disabled: an app setting
+`AzureWebJobs.detect_<ns>_<hub>.Disabled` = `true`, or the toggle on the
+function's own blade. A disabled function still appears in the list.
+
+**8. Is the plan keeping the host alive?**
+
+| Plan | What's needed |
+|---|---|
+| Consumption / Flex Consumption | Nothing. The scale controller wakes the app for Event Hub traffic. |
+| Premium (EP*) | Nothing normally. With **VNet integration or private endpoints**, turn on **Configuration → Function runtime settings → Runtime scale monitoring**, or the scale controller can't see the hub and won't scale off zero. |
+| App Service (Dedicated) plan | **Always On** must be **On** (Configuration → General settings). Without it the host idles out and the listener dies with it — the classic "worked for an hour, then stopped". |
+
+**9. Can the app reach the namespace at all?** If the namespace has public access
+disabled or a firewall, the Function App's outbound needs to be allowed (VNet
+integration + a private endpoint, or the app's outbound IPs on the namespace's
+network rules). This fails as a *connection* error in check 1, not as an auth
+error.
+
+**10. Diagnostic logs are batched by Azure**, up to ~5 minutes from event to
 delivery. Slow is not the same as broken.
 
 ---

@@ -51,7 +51,10 @@ access level **Private**:
 | `pyre-output` | `signals/<date>.jsonl` and `alerts/<date>.jsonl` — what you'll read |
 
 The containers already there (`azure-webjobs-hosts`, `azure-webjobs-secrets`,
-`app-package`, `$logs`) belong to the Functions runtime. Leave them alone.
+`app-package`, `$logs`) belong to the Functions runtime. Leave them alone. One
+more, `azure-webjobs-eventhub`, appears on its own once an Event Hub trigger
+starts listening — leave that alone too, but remember where it is: it's the
+proof in Step 9a.
 
 ---
 
@@ -68,6 +71,36 @@ connection strings.
 
 > Role assignments take **up to 5 minutes** to apply. A 403 in the first few
 > minutes is usually just this.
+
+### If your host storage is identity-based too
+
+Check **Settings → Environment variables** for `AzureWebJobsStorage`. Two
+shapes, and which one you have changes the roles above:
+
+| What you see | What it means |
+|---|---|
+| `AzureWebJobsStorage` = `DefaultEndpointsProtocol=...` | A connection string. The role above is all you need. |
+| `AzureWebJobsStorage__blobServiceUri` + `__credential` (usually with `__queueServiceUri`, `__tableServiceUri`) | The host reaches its own storage **as the managed identity**, with no secret. Better, and it needs more roles. |
+
+For the second, assign these on the storage account instead of Blob Data
+Contributor alone:
+
+| Role | Why |
+|---|---|
+| **Storage Blob Data Owner** | Microsoft's documented minimum for an identity-based `AzureWebJobsStorage`, and separately the minimum the **Event Hub trigger** needs for its checkpoints. This one covers Step 1's containers too. |
+| **Storage Queue Data Contributor** | matches `__queueServiceUri` |
+| **Storage Table Data Contributor** | matches `__tableServiceUri`; also where Functions writes the diagnostic events that explain a host that won't start |
+
+A **user-assigned** identity additionally needs
+`AzureWebJobsStorage__clientId` set to its Client ID — the host resolves each
+connection's identity separately, and this one is not covered by
+`AZURE_CLIENT_ID`.
+
+You can tell this is working without reading a single log line: the host
+creates `azure-webjobs-hosts` and `azure-webjobs-secrets` itself, so if those
+containers exist and their blobs have recent **Last modified** times, the
+identity is authenticating and creating containers right now. Which makes the
+*absence* of `azure-webjobs-eventhub` later a clean signal — see Step 9a.
 
 ---
 
@@ -163,18 +196,58 @@ with **+ Add**, then **Apply** at the bottom and confirm the restart:
 The URL is exactly `https://name.blob.core.windows.net` — no trailing slash, no
 container.
 
-Then add the namespace's own connection setting — for the `namespace: poc`
-above, that's `EVENTHUB_POC`. It's never a connection string here: the
-identity-based pair `EVENTHUB_POC__fullyQualifiedNamespace` =
-`<your-namespace>.servicebus.windows.net`, `EVENTHUB_POC__credential` =
-`managedidentity`. Same **Azure Event Hubs Data Receiver** role as Step 2, this
-time on the Event Hubs namespace. Full steps, and what to do for the next
-namespace, in [adding-a-log-source.md](adding-a-log-source.md). If it's
-missing, see [troubleshooting](troubleshooting.md#the-event-hub-trigger-never-fires).
-
 `maxEventBatchSize=50` is deliberately low so a handful of demo events arrive as
 one visible batch. It's a **ceiling, not a wait** — small backlogs still deliver
 immediately. Production runs 100–256.
+
+---
+
+## Step 5b — let the trigger reach the hub
+
+Three things, and the trigger listens to nothing until all three are true. This
+is the step people half-do.
+
+**1. The connection setting.** Its name is derived from the `namespace:` label
+in Step 4 — `namespace: poc` → `EVENTHUB_POC`, never hand-typed. Never a
+connection string either; two settings, neither a secret:
+
+| Name | Value |
+|---|---|
+| `EVENTHUB_POC__fullyQualifiedNamespace` | `<your-namespace>.servicebus.windows.net` |
+| `EVENTHUB_POC__credential` | `managedidentity` |
+
+> **The name is transformed; the value is not.** A label with a hyphen or a dot
+> becomes underscores *in the setting name only*, because Azure app-setting
+> names can't hold them — `namespace: pyre-evnthub` → `EVENTHUB_PYRE_EVNTHUB`.
+> The value stays the literal hostname, hyphens and all:
+> `pyre-evnthub.servicebus.windows.net`. Copy it from Event Hubs Namespace →
+> **Overview → Host name** rather than typing it; underscores aren't legal in a
+> namespace name, so a "corrected" one resolves to nothing.
+>
+> The label is also just a local nickname — it does **not** have to match the
+> real namespace's resource name. `/health` → `sources[].connection` prints the
+> setting name it produced, which is the end of any guessing.
+
+**2. The role.** Event Hubs **Namespace** → **Access Control (IAM)** → **+ Add →
+Add role assignment** → **Azure Event Hubs Data Receiver** → **Managed
+identity** → your Function App. Same pattern as Step 2, different resource, and
+read-only. Up to 5 minutes to apply.
+
+**3. Somewhere to keep checkpoints.** The trigger records how far it has read
+into each partition in the app's own storage account — the one in
+`AzureWebJobsStorage`, already set when the app was created. Nothing to add
+here, but it's the reason **Step 2's storage roles matter to the trigger too**,
+and it's what makes the listener visible in Step 9a.
+
+> A POC reads `$Default`, which every hub already has, so there is nothing to
+> create. If you ever set `consumer_group:` in `sources.yaml`, create that group
+> first — hub → **Entities → Consumer groups → + Consumer group**. Naming one
+> that doesn't exist stops the trigger from starting.
+
+Full steps for the *next* namespace, and the extra setting a user-assigned
+identity needs, are in [adding-a-log-source.md](adding-a-log-source.md). If a
+trigger stays silent, work through
+[troubleshooting § Is the trigger actually listening?](troubleshooting.md#is-the-trigger-actually-listening).
 
 ---
 
@@ -211,6 +284,11 @@ ingest                 HTTP trigger
 An **empty list** means the app failed to import. Open **Log stream** —
 [this section](troubleshooting.md#the-functions-list-is-empty-after-a-successful-deploy)
 tells you what to look for.
+
+**Listed is not the same as listening.** `detect_poc_logs_in` appears here
+because the code registered it; whether the host managed to open a connection to
+the hub is a separate question, answered in Step 9. If Step 5b is incomplete the
+function still shows up in this list, exactly like this.
 
 ---
 
@@ -279,6 +357,7 @@ browser.
   "output": "https://pyrestor.blob.core.windows.net/pyre-output",
   "sources": [
     { "namespace": "poc", "hub": "logs-in", "function": "detect_poc_logs_in",
+      "connection": "EVENTHUB_POC", "consumer_group": "$Default",
       "log_type_field": "category",
       "event_time_field": "time", "envelope_field": "records" }
   ],
@@ -300,9 +379,17 @@ alerts?":
   records carry `"category": "OperationalLogs"`, nothing will ever fire, and
   this line is what tells you.
 - **`eventhub_settings`** — non-empty means a namespace's app setting from
-  Step 5 is missing or misnamed; the entry names which one.
+  Step 5b is missing or misnamed; the entry names which one.
 
-Also check `sources[].log_type_field` against your data's actual casing.
+Also check `sources[].log_type_field` against your data's actual casing, and
+`sources[].connection` against the app setting you actually created — that field
+is the name the host will look for, so if it says `EVENTHUB_POC` and your
+setting is `EVENTHUB_POC_NS`, this is where you find out.
+
+**What `/health` cannot tell you is whether the trigger is listening.** The
+listener runs in the Functions host; this endpoint runs in the Python worker and
+can only see configuration. `"status": "ok"` means every trigger is *correctly
+configured*, not connected. Step 9 is the check for connected.
 
 `503` with `"status": "bundle-load-failed"` means Step 7 didn't land; the `error`
 field says why.
@@ -381,6 +468,51 @@ means `log_type_field` is wrong — usually the casing. Both name the real value
 Everything above bypassed Event Hubs. Now do it properly, still entirely in the
 portal.
 
+### 9a. Is it listening?
+
+Do this *before* sending anything, so a quiet hub and a dead listener can't be
+confused for each other. Restart the app (**Overview → Restart**) and check
+these in order — the first two take a few seconds each.
+
+**1. Log stream says nothing went wrong.** Function App → **Monitoring → Log
+stream**, then restart and read the first ~20 lines. There is no cheerful "now
+listening" line to wait for; what you're checking is that this **absence** holds:
+
+```
+The listener for function 'Functions.detect_poc_logs_in' was unable to start.
+```
+
+That line, if present, names the failure right after it — a missing app setting,
+a hub that doesn't exist, a missing role. It is the single most informative line
+in this whole guide.
+
+**2. A checkpoint container appears.** Storage account → **Containers**. Once a
+listener attaches, the host creates **`azure-webjobs-eventhub`** and writes
+partition-ownership blobs under a path built from your namespace, hub and
+consumer group:
+
+```
+azure-webjobs-eventhub/
+  <namespace>.servicebus.windows.net/logs-in/$default/ownership/0
+  <namespace>.servicebus.windows.net/logs-in/$default/checkpoint/0     (after the first batch)
+```
+
+**This is the proof.** Those blobs cannot exist unless the host authenticated to
+the namespace, resolved the hub, and claimed partitions. The `ownership` blobs
+appear on connect; `checkpoint` blobs appear once events have actually been
+processed. Their **Last modified** time keeps moving while the listener is alive,
+so a stale timestamp on a running app means it stopped listening.
+
+**3. The namespace agrees someone is reading.** Event Hubs Namespace →
+**Monitoring → Metrics**: `ActiveConnections` goes above zero when the listener
+connects, and `Outgoing Messages` (split by **Entity name** to see your hub)
+climbs once it's reading. Incoming without outgoing = data arriving, nobody
+consuming it.
+
+Nothing there? → [troubleshooting § Is the trigger actually listening?](troubleshooting.md#is-the-trigger-actually-listening)
+
+### 9b. Send through the hub
+
 Your logs are Azure's own diagnostic records about Event Hub activity, so **the
 hub feeds itself**: connecting, sending, and failing to authorise all generate
 records that flow back in.
@@ -391,6 +523,22 @@ anything. That connection and send are themselves audited.
 Azure batches diagnostic logs before delivery, so allow **several minutes** (up
 to 5). That's Azure's pipeline, not the engine. Watch **Log stream** for the
 batch arriving, then re-read the output blobs.
+
+Two ways to confirm the trigger actually ran, once you're past watching a live
+log stream:
+
+- Function App → **Overview → Functions → `detect_poc_logs_in` → Monitor**. One
+  row per invocation, each with the batch it processed. Backed by Application
+  Insights, so allow a couple of minutes for rows to appear.
+- Application Insights → **Logs**:
+
+  ```kusto
+  requests | where name startswith "detect_" | order by timestamp desc
+  ```
+
+An invocation with no signals behind it is a *routing* problem, not a listening
+one — the trigger did its job. Step 8c's log lines say which value went
+unrouted.
 
 > Dedup state from Step 8b is still warm, so repeating identical activity may
 > produce **no new alerts**. That's correct. For a clean run, **Restart** the app
