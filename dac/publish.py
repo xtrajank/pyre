@@ -11,9 +11,11 @@ running workers to pick it up - no Function App deploy, no portal.
 Without `--upload` it writes the two files and tells you where to drop them in
 the portal, which is the no-tooling path for a first run.
 
-What it produces:
+What it produces, in a `dist/` folder next to --source (so publishing several
+collections from one shell never has one build's output land inside another's
+source tree):
 
-    dist/bundles/sha256-xxxxxxxx.zip     the bundle: every .py/.yml in this repo
+    dist/bundles/sha256-xxxxxxxx.zip     the bundle: every .py/.yml under --source
     dist/current.json                    {"version": "...", "path": "bundles/..."}
 
 The version is a content hash, so it changes whenever a rule changes - and a
@@ -282,7 +284,8 @@ def main():
                     help="also include this folder, e.g. a global_helpers/ outside --source")
     ap.add_argument("--exclude", action="append", default=[], metavar="GLOB",
                     help="skip paths matching this glob (repeatable)")
-    ap.add_argument("--out", default=None, help="output dir (default: <cwd>/dist)")
+    ap.add_argument("--out", default=None,
+                    help="output dir (default: a 'dist' folder next to --source)")
     ap.add_argument("--version", default=None, help="pin the version instead of hashing contents")
     # Deliberately has no environment-variable default: publishing is an action
     # with a blast radius, and it should never happen because a shell happened to
@@ -294,7 +297,10 @@ def main():
     args = ap.parse_args()
 
     source = os.path.abspath(args.source)
-    out = os.path.abspath(args.out or os.path.join(os.getcwd(), "dist"))
+    # Next to --source, not the caller's cwd: publishing two collections from
+    # one shell (`--source a/rules`, then `--source b/rules`) must not have the
+    # second build's dist/ overwrite the first's.
+    out = os.path.abspath(args.out or os.path.join(os.path.dirname(source), "dist"))
     files = _collect(source, [os.path.abspath(d) for d in args.extra],
                      ALWAYS_EXCLUDE + args.exclude)
     if not files:

@@ -317,9 +317,13 @@ def test_publish_produces_a_bundle_the_engine_can_load(tmp_path):
     assert out.returncode == 0, out.stdout + out.stderr
     assert "RuntimeAuditLogs" in out.stdout          # surfaces the routing value to compare
 
-    zips = list((repo / "dist" / "bundles").glob("*.zip"))
+    # dist/ lands next to --source (here, the repo itself), not inside it - so
+    # publishing several collections from one shell can never have one build's
+    # dist/ land inside another's source tree.
+    dist = repo.parent / "dist"
+    zips = list((dist / "bundles").glob("*.zip"))
     assert len(zips) == 1
-    pointer = json.loads((repo / "dist" / "current.json").read_text())
+    pointer = json.loads((dist / "current.json").read_text())
     assert pointer["path"] == f"bundles/{zips[0].name}"
 
     extracted = tmp_path / "extracted"
@@ -356,7 +360,7 @@ def test_publish_reports_the_version_changing_when_a_rule_changes(tmp_path):
     def version():
         subprocess.run([sys.executable, "publish.py"], cwd=repo, capture_output=True, text=True,
                        check=True)
-        return json.loads((repo / "dist" / "current.json").read_text())["version"]
+        return json.loads((repo.parent / "dist" / "current.json").read_text())["version"]
 
     before = version()
     assert version() == before                                   # unchanged repo, same version
