@@ -1,7 +1,7 @@
 # Never commit: real configuration and anything derived from it.
 .env
 .env.*
-local.settings.json
+*.settings.json
 
 # Your instance's log sources. config/sources.example.yaml is the template that
 # stays in the repo; copy it to config/sources.yaml and edit. Drop this line on

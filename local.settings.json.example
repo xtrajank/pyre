@@ -21,7 +21,7 @@
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
 
     "//INSTANCE_LABEL": "Free text, echoed by /health. Nothing reads it.",
-    "INSTANCE_LABEL": "local",
+    "INSTANCE_LABEL": "prod",
     "//LOG_LEVEL": "DEBUG|INFO|WARNING|ERROR. INFO is one line per batch.",
     "LOG_LEVEL": "INFO",
 
@@ -33,7 +33,8 @@
     "EVENTHUB_PYRE_EVNTHUB__fullyQualifiedNamespace": "<namespace>.servicebus.windows.net",
 
     "//DETECTIONS_SOURCE": "blob|local. `local` reads DETECTIONS_LOCAL_DIR off disk.",
-    "DETECTIONS_SOURCE": "local",
+    "DETECTIONS_SOURCE": "blob",
+    "//DETECTIONS_LOCAL_DIR": "Used only when DETECTIONS_SOURCE=local.",
     "DETECTIONS_LOCAL_DIR": "./dac",
     "//DETECTIONS_BLOB_*": "Used only when DETECTIONS_SOURCE=blob.",
     "DETECTIONS_BLOB_ACCOUNT_URL": "https://<account>.blob.core.windows.net",
