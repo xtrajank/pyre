@@ -5,11 +5,16 @@
 .git*
 .vscode/
 .claude/
+
 .venv/
+.venv/**
 venv/
-__pycache__/
-*.pyc
+venv/**
+
+**/__pycache__/
+**/*.pyc
 .pytest_cache/
+.pytest_cache/**
 
 # Not runtime code
 tests/
@@ -18,6 +23,7 @@ tools/
 dac/
 infra/
 dist/
+
 README.md
 *.md
 *.example
