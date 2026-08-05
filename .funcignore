@@ -24,4 +24,4 @@ README.md
 *.example.yaml
 azure-pipelines*.yml
 requirements-dev.txt
-local.settings.json
+*.settings.json
