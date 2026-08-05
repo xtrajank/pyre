@@ -14,12 +14,26 @@ Design notes that matter at volume:
   * idempotency is a short-TTL "seen" key per event id, which makes Event Hubs'
     at-least-once redelivery safe
 """
+import hashlib
 import logging
 import os
 import threading
 import time
 
 log = logging.getLogger("pyre.state")
+
+
+def _scope(det_id: str, dedup_str: str) -> str:
+    """The key suffix identifying one detection's one dedup group.
+
+    The dedup string is HASHED rather than interpolated. A dedup string is
+    detection-authored and derived from event data, so it can contain `:` (an
+    IP:port, a URL, a DN) and would otherwise merge into the key namespace -
+    two different detections could then collide on one counter. Hashing also
+    bounds the key size, which the 1000-char dedup truncation upstream no longer
+    has to do on Redis' behalf.
+    """
+    return f"{det_id}:{hashlib.sha256(dedup_str.encode('utf-8')).hexdigest()[:32]}"
 
 
 class StateStore:
@@ -35,7 +49,7 @@ class StateStore:
 
     # ---- dedup + threshold -------------------------------------------------
     def bump_dedup(self, pipe, det_id: str, dedup_str: str, ttl: int) -> None:
-        key = f"dd:{det_id}:{dedup_str}"
+        key = f"dd:{_scope(det_id, dedup_str)}"
         pipe.incr(key)
         pipe.expire(key, ttl, nx=True)   # TTL on first write only: the window must not slide
 
@@ -43,7 +57,7 @@ class StateStore:
         """Add a value to the distinct set and read the new count back in the
         SAME round-trip, which is the shape the batch loop needs to decide
         unique-mode thresholds without a per-match call."""
-        key = f"uniq:{det_id}:{dedup_str}"
+        key = f"uniq:{_scope(det_id, dedup_str)}"
         pipe.pfadd(key, value)
         pipe.expire(key, ttl, nx=True)
         pipe.pfcount(key)
@@ -53,11 +67,11 @@ class StateStore:
         """The id of the alert already open for this dedup string, or None.
         Returning the id rather than a bool is what lets a grouped match record
         which alert it belongs to."""
-        return self._r.get(f"alert:{det_id}:{dedup_str}")
+        return self._r.get(f"alert:{_scope(det_id, dedup_str)}")
 
     def register_alert(self, det_id: str, dedup_str: str, alert_id: str, ttl: int) -> bool:
         """Atomic first-event-wins claim: only one worker can create the marker."""
-        return bool(self._r.set(f"alert:{det_id}:{dedup_str}", alert_id, nx=True, ex=ttl))
+        return bool(self._r.set(f"alert:{_scope(det_id, dedup_str)}", alert_id, nx=True, ex=ttl))
 
     # ---- storm limiter -----------------------------------------------------
     def storm_ok(self, det_id: str, hour_bucket: str, limit: int) -> bool:
@@ -72,12 +86,17 @@ class StateStore:
 
 
 def build_state_store(cfg) -> StateStore:
-    """Redis when REDIS_HOST is set, in-process otherwise. One setting, no mode
-    flag that can contradict it."""
-    if cfg.redis_host:
+    """STATE_BACKEND names which. `redis` with no REDIS_HOST is reported by
+    RuntimeConfig.problems() and falls back here rather than failing the app -
+    detection with per-worker state beats no detection at all."""
+    if cfg.state_backend == "redis" and cfg.redis_host:
         log.info("state: redis at %s (shared across workers)", cfg.redis_host)
         return StateStore(_redis_client(cfg))
-    log.info("state: in-process (per worker, resets on restart)")
+    if cfg.state_backend == "redis":
+        log.error("STATE_BACKEND=redis but REDIS_HOST is not set; falling back to "
+                  "in-process state. Thresholds and dedup will NOT be shared across workers.")
+    else:
+        log.info("state: in-process (per worker, resets on restart)")
     return StateStore(MemoryClient())
 
 

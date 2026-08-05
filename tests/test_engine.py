@@ -8,9 +8,10 @@ from conftest import DAC, sample_messages
 from pyre_engine.config import RuntimeConfig, Source
 from pyre_engine.processor import Processor, _unwrap
 
-# The POC's real shape: Azure diagnostic settings wrap records in `records`, and
-# Event Hubs runtime audit records use PascalCase field names.
-AZURE = Source(hub="logs-in", log_type_field="Category", event_time_field="Timestamp")
+# A real Azure shape: diagnostic settings wrap records in `records`, and Event
+# Hubs runtime audit records use PascalCase field names.
+AZURE = Source(hub="logs-in", namespace="platform", log_type_field="Category",
+               event_time_field="Timestamp")
 
 
 class CaptureSink:
@@ -32,9 +33,11 @@ class CaptureSink:
         return [r for r in self.records if r["p_record_type"] == "alert"]
 
 
-def build(bundle=DAC, state=None):
-    cfg = RuntimeConfig(sources=[AZURE], dac_local_dir=bundle, dac_refresh_seconds=0,
-                        redis_host="", output_blob_account_url="", output_http_url="")
+def build(bundle=DAC, state=None, **overrides):
+    cfg = RuntimeConfig(sources=[AZURE], detections_source="local",
+                        detections_local_dir=bundle, detections_refresh_seconds=0,
+                        state_backend="memory", redis_host="",
+                        signal_destination="none", alert_destination="none", **overrides)
     sink = CaptureSink()
     return Processor(cfg, state=state, sink=sink), sink
 
@@ -52,8 +55,8 @@ def test_the_documented_signals_and_alerts_come_out():
 
     assert len(sink.signals) == 4
     assert len(sink.alerts) == 1
-    assert "203.0.113.55" in sink.alerts[0]["title"]
-    assert {s["dedup"] for s in sink.signals} == {
+    assert "203.0.113.55" in sink.alerts[0]["p_title"]
+    assert {s["p_dedup"] for s in sink.signals} == {
         "eh-auth-failure:203.0.113.55", "eh-auth-failure:198.51.100.77"}
 
 
@@ -67,12 +70,14 @@ def test_signals_link_to_the_alert_they_rolled_into():
     proc.process_batch(sample_messages(), AZURE, event_ids=["0:1", "0:2", "0:3"])
 
     alert_id = sink.alerts[0]["p_alert_id"]
-    noisy = [s for s in sink.signals if s["dedup"].endswith("203.0.113.55")]
-    quiet = [s for s in sink.signals if s["dedup"].endswith("198.51.100.77")]
+    noisy = [s for s in sink.signals if s["p_dedup"].endswith("203.0.113.55")]
+    quiet = [s for s in sink.signals if s["p_dedup"].endswith("198.51.100.77")]
 
     # Threshold 3: the first two are below it, the third raises the alert.
     assert [s["p_alert_id"] for s in noisy] == [None, None, alert_id]
     assert [s["p_alert_id"] for s in quiet] == [None]
+    # The alert names the exact signal that raised it.
+    assert sink.alerts[0]["p_first_signal_id"] == noisy[2]["p_signal_id"]
 
     # A fourth failure from the same IP joins the alert already open, rather
     # than raising a second one.
@@ -103,7 +108,109 @@ def test_a_global_helper_is_importable_from_a_detection():
     external = json.dumps({"records": [
         {"Category": "RuntimeAuditLogs", "ActivityStatus": "Failure", "ClientIp": "8.8.8.8"}]})
     proc.process_batch([internal, external], AZURE, event_ids=["0:10", "0:11"])
-    assert [s["dedup"] for s in sink.signals] == ["eh-auth-failure:8.8.8.8"]
+    assert [s["p_dedup"] for s in sink.signals] == ["eh-auth-failure:8.8.8.8"]
+
+
+# ---- the record schema ------------------------------------------------------
+# docs/signals-and-alerts.md documents these field lists. A field added to
+# records.py without being documented, or removed while a consumer still reads
+# it, fails here.
+
+SIGNAL_FIELDS = {
+    "p_schema_version", "p_record_type", "p_signal_id", "p_alert_id",
+    "p_detection_id", "p_detection_name", "p_severity", "p_tags", "p_reports",
+    "p_log_type", "p_source_namespace", "p_source_hub",
+    "p_dedup", "p_event_time", "p_processed_time", "p_event",
+}
+ALERT_FIELDS = {
+    "p_schema_version", "p_record_type", "p_alert_id",
+    "p_detection_id", "p_detection_name", "p_severity", "p_title", "p_description",
+    "p_runbook", "p_reference", "p_tags", "p_reports",
+    "p_log_type", "p_source_namespace", "p_source_hub",
+    "p_dedup", "p_threshold", "p_dedup_period_minutes", "p_signal_count",
+    "p_first_signal_id", "p_first_event_time", "p_created_time", "p_context", "p_event",
+}
+
+
+def test_a_signal_carries_every_documented_field():
+    proc, sink = build()
+    proc.process_batch(sample_messages(), AZURE, event_ids=["0:1", "0:2", "0:3"])
+    signal = sink.signals[0]
+
+    assert SIGNAL_FIELDS <= set(signal)
+    # Anything extra must be a p_any_* pivot field - nothing else may appear at
+    # the top level, or a consumer's schema breaks silently.
+    assert all(k.startswith("p_any_") for k in set(signal) - SIGNAL_FIELDS)
+    assert signal["p_source_namespace"] == "platform" and signal["p_source_hub"] == "logs-in"
+    assert signal["p_log_type"] == "RuntimeAuditLogs"
+    assert signal["p_event_time"] == "2026-07-31T14:00:00.1234567Z"
+    assert signal["p_processed_time"].endswith("Z")          # the engine's own clock
+    assert signal["p_event"]["ClientIp"] == "203.0.113.55"   # the raw record, untouched
+
+
+def test_an_alert_is_self_sufficient_for_case_creation():
+    """Everything a case tool needs without joining back to the signals stream:
+    what fired, how bad, where from, what to do about it, and one example event."""
+    proc, sink = build()
+    proc.process_batch(sample_messages(), AZURE, event_ids=["0:1", "0:2", "0:3"])
+    alert = sink.alerts[0]
+
+    assert ALERT_FIELDS <= set(alert)
+    assert all(k.startswith("p_any_") for k in set(alert) - ALERT_FIELDS)
+    assert alert["p_detection_name"] == "Repeated Event Hub Authorization Failures"
+    assert alert["p_runbook"] and alert["p_description"] and alert["p_reference"]
+    assert alert["p_tags"] == ["Azure", "EventHub"]
+    assert alert["p_reports"]["MITRE ATT&CK"] == ["TA0006:T1110"]
+    assert alert["p_log_type"] == "RuntimeAuditLogs"
+    assert alert["p_source_namespace"] == "platform"
+    # The threshold context that fired it.
+    assert (alert["p_threshold"], alert["p_signal_count"]) == (3, 3)
+    assert alert["p_dedup_period_minutes"] == 60
+    assert alert["p_created_time"].endswith("Z")
+    assert alert["p_event"]["ClientIp"] == "203.0.113.55"
+
+
+def test_indicators_become_p_any_fields_on_both_records():
+    """`p_any_*` is what makes "everything involving this IP" work across log
+    types that spell the field differently."""
+    proc, sink = build()
+    proc.process_batch(sample_messages(), AZURE, event_ids=["0:1", "0:2", "0:3"])
+
+    for record in (sink.signals[0], sink.alerts[0]):
+        assert record["p_any_ip_addresses"] == ["203.0.113.55"]
+        assert record["p_any_actor_ids"] == ["RootManageSharedAccessKey"]
+
+
+def test_indicators_are_normalized_and_a_bad_one_costs_only_itself(tmp_path):
+    from pyre_engine.records import normalize_indicators
+
+    # Both spellings work, values become a sorted list of strings, and empties go.
+    assert normalize_indicators({"ip_addresses": "1.1.1.1"}) == {"p_any_ip_addresses": ["1.1.1.1"]}
+    assert normalize_indicators({"p_any_usernames": ["b", "a", "a"]}) == {
+        "p_any_usernames": ["a", "b"]}
+    assert normalize_indicators({"x": None, "y": [], "z": [""]}) == {}
+    # A detection returning nonsense loses its indicators, not its record.
+    assert normalize_indicators("not a dict") == {}
+    assert normalize_indicators(None) == {}
+
+
+def test_a_detection_without_optional_functions_still_produces_both_records(tmp_path):
+    """`rule()` is the only requirement. Everything else must fall back rather
+    than raise, or a minimal detection takes the batch down."""
+    (tmp_path / "m.py").write_text("def rule(e): return True\n")
+    (tmp_path / "m.yml").write_text(
+        "AnalysisType: rule\nRuleID: minimal\nFilename: m.py\nLogTypes: [T]\n")
+
+    proc, sink = build(bundle=str(tmp_path))
+    src = Source(hub="h", log_type_field="lt", envelope_field="")
+    proc.process_batch([json.dumps({"lt": "T"})], src)
+
+    assert SIGNAL_FIELDS <= set(sink.signals[0])
+    assert ALERT_FIELDS <= set(sink.alerts[0])
+    assert sink.alerts[0]["p_title"] == "minimal"        # falls back to the RuleID
+    assert sink.alerts[0]["p_severity"] == "INFO"        # the YAML default
+    assert sink.alerts[0]["p_context"] == {}
+    assert sink.signals[0]["p_dedup"] == "minimal"       # dedup falls back to the title
 
 
 # ---- redelivery -------------------------------------------------------------
@@ -115,6 +222,21 @@ def test_replaying_the_same_batch_is_suppressed():
     sink.records.clear()
     proc.process_batch(messages, AZURE, event_ids=["0:1", "0:2", "0:3"])
     assert sink.records == []
+
+
+def test_a_redelivery_is_counted_once_not_logged_per_event(caplog):
+    """The per-event version of this line is loudest exactly when a redelivery
+    storm makes the logs least readable."""
+    import logging
+    proc, _sink = build()
+    messages = sample_messages()
+    proc.process_batch(messages, AZURE, event_ids=["0:1", "0:2", "0:3"])
+    with caplog.at_level(logging.INFO, logger="pyre.processor"):
+        proc.process_batch(messages, AZURE, event_ids=["0:1", "0:2", "0:3"])
+
+    redelivery_lines = [r for r in caplog.records if "redelivery" in r.message]
+    assert len(redelivery_lines) == 1
+    assert "7 event(s)" in caplog.text
 
 
 def test_envelope_records_get_independent_redelivery_ids():
@@ -140,18 +262,23 @@ def test_two_sources_with_different_shapes_share_one_processor():
     Azure envelope keyed on `Category` and a flat normalized record keyed on
     `dataset`, in the same deployment."""
     proc, sink = build()
-    flat = Source(hub="normalized-in", log_type_field="dataset",
+    flat = Source(hub="normalized-in", namespace="network", log_type_field="dataset",
                   event_time_field="_time", envelope_field="")
 
     proc.process_batch(sample_messages(), AZURE, event_ids=["0:1", "0:2", "0:3"])
     assert len(sink.signals) == 4
+    assert {s["p_source_hub"] for s in sink.signals} == {"logs-in"}
 
     sink.records.clear()
     proc.process_batch([json.dumps({
         "dataset": "RuntimeAuditLogs", "_time": "2026-07-31T00:00:00Z",
         "ActivityStatus": "Failure", "ClientIp": "9.9.9.9"})], flat)
     assert len(sink.signals) == 1
-    assert sink.signals[0]["event_time"] == "2026-07-31T00:00:00Z"
+    assert sink.signals[0]["p_event_time"] == "2026-07-31T00:00:00Z"
+    # Every record says which source produced it, which is what makes one
+    # destination readable when twenty sources write into it.
+    assert sink.signals[0]["p_source_namespace"] == "network"
+    assert sink.signals[0]["p_source_hub"] == "normalized-in"
 
 
 def test_unwrap_handles_the_three_message_shapes():
@@ -180,19 +307,56 @@ def test_an_unrouted_log_type_is_named_in_the_logs(caplog):
     assert "SomeOtherLogs" in caplog.text
 
 
+def test_every_batch_reports_what_it_did(caplog):
+    """The one line that answers "is it running?" in Azure. One per invocation,
+    whatever the volume."""
+    import logging
+    proc, _sink = build()
+    with caplog.at_level(logging.INFO, logger="pyre.processor"):
+        proc.process_batch(sample_messages(), AZURE, event_ids=["0:1", "0:2", "0:3"])
+
+    lines = [r.message for r in caplog.records if r.message.startswith("batch ")]
+    assert len(lines) == 1
+    assert "platform/logs-in" in lines[0]
+    assert "msgs=3 events=7 new=7 signals=4 alerts=1" in lines[0]
+
+
+def test_a_detection_that_raises_is_isolated_and_logged_once(caplog, tmp_path):
+    """One broken detection must not take the batch, and must not emit a stack
+    trace per event either."""
+    (tmp_path / "boom.py").write_text("def rule(e): raise ValueError('boom')\n")
+    (tmp_path / "boom.yml").write_text(
+        "AnalysisType: rule\nRuleID: boom\nFilename: boom.py\nLogTypes: [T]\n")
+    (tmp_path / "ok.py").write_text("def rule(e): return True\n")
+    (tmp_path / "ok.yml").write_text(
+        "AnalysisType: rule\nRuleID: ok\nFilename: ok.py\nLogTypes: [T]\n")
+
+    proc, sink = build(bundle=str(tmp_path))
+    src = Source(hub="h", log_type_field="lt", envelope_field="")
+    proc.process_batch([json.dumps({"lt": "T", "n": i}) for i in range(5)], src)
+
+    # The healthy detection still ran on every event.
+    assert len(sink.signals) == 5
+    # One traceback, then a counted summary - not five tracebacks.
+    assert len([r for r in caplog.records if r.exc_info]) == 1
+    assert "boom (5x)" in caplog.text
+
+
 # ---- state: the two backends must agree -------------------------------------
 
 def test_memory_and_redis_state_produce_identical_results():
-    """The claim behind running without Redis in the POC: what you demo is what
-    ships. fakeredis drives redis-py, so StateStore's real Redis calls run."""
+    """The claim behind running without Redis on a single instance: what you try
+    is what ships. fakeredis drives redis-py, so StateStore's real Redis calls
+    run."""
     fakeredis = pytest.importorskip("fakeredis")
     from pyre_engine.state import MemoryClient, StateStore
 
     def run(client):
         proc, sink = build(state=StateStore(client))
         proc.process_batch(sample_messages(), AZURE, event_ids=["0:1", "0:2", "0:3"])
-        return ([(r["detection_id"], r["dedup"], r["p_alert_id"] is not None) for r in sink.signals],
-                [(r["detection_id"], r["severity"], r["dedup"]) for r in sink.alerts])
+        return ([(r["p_detection_id"], r["p_dedup"], r["p_alert_id"] is not None)
+                 for r in sink.signals],
+                [(r["p_detection_id"], r["p_severity"], r["p_dedup"]) for r in sink.alerts])
 
     memory = run(MemoryClient())
     redis_ = run(fakeredis.FakeStrictRedis(decode_responses=True))
@@ -234,9 +398,47 @@ def test_memory_pipeline_returns_one_result_per_queued_command():
     assert pipe.execute() == []                  # queue cleared after execute
 
 
-def test_state_backend_follows_redis_host():
-    assert RuntimeConfig(redis_host="").state_backend == "memory"
-    assert RuntimeConfig(redis_host="x.redis.cache.windows.net").state_backend == "redis"
+def test_a_dedup_string_cannot_reach_into_the_key_namespace():
+    """Dedup strings are detection-authored and derived from event data, so they
+    routinely contain ':' (an IP:port, a URL, a DN). Interpolated raw, two
+    different detections could collide on one counter."""
+    from pyre_engine.state import _scope
+
+    assert _scope("a", "b:c") != _scope("a:b", "c")
+    assert ":" not in _scope("det", "1.2.3.4:443").split(":", 1)[1]
+    # Same inputs, same key - the window has to be findable again.
+    assert _scope("det", "x") == _scope("det", "x")
+
+
+def test_state_backend_is_chosen_by_its_own_setting():
+    """Not by whether REDIS_HOST happens to be set: two settings that can
+    disagree is exactly the mode confusion this design removes."""
+    assert RuntimeConfig(state_backend="memory", redis_host="x").state_backend == "memory"
+    assert RuntimeConfig(state_backend="redis", redis_host="x").state_backend == "redis"
+
+
+def test_a_storm_dropped_alert_leaves_no_claim_behind(tmp_path):
+    """The storm limiter must not consume the dedup claim. Claiming first would
+    leave an `alert:` marker for an alert that was never written, and every later
+    match in the window would then be stamped with an alert id that exists
+    nowhere."""
+    (tmp_path / "s.py").write_text(
+        "def rule(e): return True\n"
+        "def dedup(e): return e['k']\n")
+    (tmp_path / "s.yml").write_text(
+        "AnalysisType: rule\nRuleID: stormy\nFilename: s.py\nLogTypes: [T]\n")
+
+    proc, sink = build(bundle=str(tmp_path), alert_storm_limit_per_hour=1)
+    src = Source(hub="h", log_type_field="lt", envelope_field="")
+    proc.process_batch([json.dumps({"lt": "T", "k": k}) for k in ("a", "b")], src)
+
+    # The limit is 1/hour, so 'a' alerts and 'b' is dropped.
+    assert [a["p_dedup"] for a in sink.alerts] == ["a"]
+    dropped = [s for s in sink.signals if s["p_dedup"] == "b"]
+    # The dropped one's signal must NOT point at a nonexistent alert.
+    assert [s["p_alert_id"] for s in dropped] == [None]
+    # And no claim was left behind, so 'b' can still alert once the limit lifts.
+    assert proc.state.alert_exists("stormy", "b") is None
 
 
 def test_unique_counts_distinct_values_not_matches(tmp_path):

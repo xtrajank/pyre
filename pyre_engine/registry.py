@@ -30,8 +30,14 @@ class Detection:
     """One detection: its YAML metadata plus the module holding `rule()`.
 
     Only `rule()` is required. Everything else is an optional function on the
-    module (`title`, `dedup`, `severity`, `alert_context`, `unique`), and falls
-    back to the YAML or to a sane default when absent.
+    module (`title`, `dedup`, `severity`, `alert_context`, `unique`,
+    `indicators`), and falls back to the YAML or to a sane default when absent.
+
+    The metadata keys are panther-analysis' own, so an existing detection repo
+    loads unchanged. The descriptive ones (`Description`, `Runbook`,
+    `Reference`, `Tags`, `Reports`) do not change what fires - they travel on
+    every alert so a responder gets the runbook with the page rather than having
+    to go and find the detection.
     """
 
     def __init__(self, meta: dict, module: ModuleType):
@@ -42,6 +48,14 @@ class Detection:
         self.default_severity = meta.get("Severity", "INFO")
         self.threshold = int(meta.get("Threshold", 1))
         self.dedup_period_seconds = int(meta.get("DedupPeriodMinutes", 60)) * 60
+
+        # Carried onto records; never affects routing or firing.
+        self.display_name = meta.get("DisplayName") or self.id
+        self.description = meta.get("Description", "")
+        self.runbook = meta.get("Runbook", "")
+        self.reference = meta.get("Reference", "")
+        self.tags = list(meta.get("Tags") or [])
+        self.reports = dict(meta.get("Reports") or {})
         self._m = module
 
     def _call(self, name, event, default=None):
@@ -69,6 +83,19 @@ class Detection:
         IPs" rather than "5 matches". No `unique()` on the module keeps the
         normal total-count behaviour."""
         return self._call("unique", event, default=None)
+
+    def indicators(self, event) -> dict:
+        """Optional. The pivot values in this event, as
+        `{"ip_addresses": [...], "usernames": [...]}` - they become `p_any_*`
+        fields on the signal and the alert, which is how you ask "everything
+        involving this IP" across every log type.
+
+        Declared by the detection rather than extracted by the engine: only the
+        detection knows which of its log type's fields are an actor and which
+        are a hostname, and a regex sweep over every event would cost far more
+        and still guess wrong.
+        """
+        return self._call("indicators", event, default=None)
 
 
 class Registry:

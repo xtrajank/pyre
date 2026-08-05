@@ -15,11 +15,18 @@ LogTypes:
 Threshold: 3              # matches sharing a dedup string before an alert fires
 DedupPeriodMinutes: 60    # how long one alert covers repeats
 
+# Everything below travels on the ALERT, so a responder gets the context with
+# the page instead of having to come back here and read the detection. None of
+# it affects whether the rule fires.
 Description: Three or more failed Event Hubs authorization attempts from one client.
 Runbook: >
   Check whether the client IP and identity are expected senders/receivers for
   this namespace. Repeated failures usually mean a stale SAS key or an identity
   that lost its role assignment - but they look exactly like probing too.
+Reference: https://learn.microsoft.com/azure/event-hubs/monitor-event-hubs-reference
 Tags:
   - Azure
   - EventHub
+Reports:
+  MITRE ATT&CK:
+    - "TA0006:T1110"        # Credential Access: Brute Force

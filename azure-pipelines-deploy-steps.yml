@@ -1,0 +1,39 @@
+# The steps that put this repo onto one Function App. Shared by the gated and
+# ungated forms in azure-pipelines-deploy.yml so they cannot drift.
+
+parameters:
+  - name: azureSubscription
+    type: string
+  - name: appName
+    type: string
+
+steps:
+  - task: UsePythonVersion@0
+    inputs: { versionSpec: "3.11" }
+
+  # config/sources.yaml is gitignored, so a clean clone does not have one - and
+  # an app deployed without it registers ZERO triggers while still returning a
+  # healthy-looking function list. Fail here instead, where the message says
+  # what to do. See docs/deploying.md#log-sources-in-a-pipeline.
+  - script: |
+      if [ ! -f config/sources.yaml ]; then
+        echo "##vso[task.logissue type=error]config/sources.yaml is missing."
+        echo "The app would deploy with no Event Hub triggers at all."
+        echo "Commit it on this branch (drop the config/sources.yaml line from"
+        echo ".gitignore), or generate it in a step before this one."
+        exit 1
+      fi
+      python -c "from pyre_engine.config import load_sources; s = load_sources(); print(f'{len(s)} source(s):'); [print(' ', x.function_name) for x in s]"
+    displayName: verify log sources
+
+  - task: AzureFunctionApp@2
+    displayName: deploy ${{ parameters.appName }}
+    inputs:
+      connectedServiceNameARM: ${{ parameters.azureSubscription }}
+      appType: functionAppLinux
+      appName: ${{ parameters.appName }}
+      package: $(System.DefaultWorkingDirectory)
+      runtimeStack: "PYTHON|3.11"
+      # Build dependencies on the worker from requirements.txt, the same as a
+      # VS Code deploy. Do not vendor packages into the repo.
+      appSettings: -SCM_DO_BUILD_DURING_DEPLOYMENT true -ENABLE_ORYX_BUILD true

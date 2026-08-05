@@ -1,0 +1,54 @@
+# One deploy stage, for one pyre instance. Instantiated once per instance from
+# azure-pipelines.yml - see that file for how to add another.
+#
+# Nothing here knows or cares what an instance is FOR. The name, the Function
+# App and the service connection are all parameters, so "a second instance" is
+# five lines in the caller, not a copy of this file.
+
+parameters:
+  # Stage id and display name. Must be unique in the pipeline and a valid
+  # identifier (letters, digits, underscore).
+  - name: instance
+    type: string
+  # ARM service connection for THIS instance's subscription. Each instance gets
+  # its own: a shared connection means one stage can deploy over another's app.
+  - name: azureSubscription
+    type: string
+  # Function App name.
+  - name: appName
+    type: string
+  # Azure DevOps environment to attach approval checks to. Leave empty to deploy
+  # with no gate.
+  - name: environment
+    type: string
+    default: ""
+  - name: dependsOn
+    type: object
+    default: []
+
+stages:
+  - stage: deploy_${{ parameters.instance }}
+    displayName: deploy ${{ parameters.instance }}
+    dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - ${{ if parameters.environment }}:
+          - deployment: deploy
+            displayName: deploy to ${{ parameters.appName }}
+            environment: ${{ parameters.environment }}
+            strategy:
+              runOnce:
+                deploy:
+                  steps:
+                    - checkout: self
+                    - template: azure-pipelines-deploy-steps.yml
+                      parameters:
+                        azureSubscription: ${{ parameters.azureSubscription }}
+                        appName: ${{ parameters.appName }}
+      - ${{ else }}:
+          - job: deploy
+            displayName: deploy to ${{ parameters.appName }}
+            steps:
+              - template: azure-pipelines-deploy-steps.yml
+                parameters:
+                  azureSubscription: ${{ parameters.azureSubscription }}
+                  appName: ${{ parameters.appName }}

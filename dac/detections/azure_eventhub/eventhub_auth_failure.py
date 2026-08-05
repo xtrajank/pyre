@@ -49,3 +49,14 @@ def alert_context(event):
         "activityName": event.get("ActivityName"),
         "resourceId": event.get("ResourceId"),
     }
+
+
+def indicators(event):
+    # Optional. These become `p_any_*` fields on the signal AND the alert, which
+    # is how "everything involving this IP" works across log types that spell
+    # the field differently. Only this detection knows which of its fields are
+    # pivots, which is why it declares them rather than the engine guessing.
+    return {
+        "ip_addresses": [event.get("ClientIp")],
+        "actor_ids": [event.get("AuthKey")],
+    }

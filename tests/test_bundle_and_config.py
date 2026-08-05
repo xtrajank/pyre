@@ -10,8 +10,9 @@ import zipfile
 import pytest
 
 from conftest import DAC, REPO
-from pyre_engine.bundle import LocalBundleSource
-from pyre_engine.config import Source, check_eventhub_settings, load_sources
+from pyre_engine.bundle import BlobBundleSource, LocalBundleSource, source_from_config
+from pyre_engine.config import (RuntimeConfig, Source, check_eventhub_settings,
+                                load_sources)
 from pyre_engine.registry import BundleLoader, Registry
 
 PUBLISH = os.path.join(DAC, "publish.py")
@@ -19,24 +20,36 @@ PUBLISH = os.path.join(DAC, "publish.py")
 
 # ---- sources.yaml -----------------------------------------------------------
 
-def test_the_shipped_sources_file_parses():
-    """config/sources.yaml ships inside the deployment, so a typo in it takes
-    the whole app down at cold start. Parse it here instead."""
-    sources = load_sources(os.path.join(REPO, "config", "sources.yaml"))
+def test_the_example_sources_file_parses():
+    """config/sources.example.yaml is what everyone copies, so it has to be a
+    valid file - not just readable prose. config/sources.yaml itself is
+    gitignored and may not exist on a clean clone."""
+    sources = load_sources(os.path.join(REPO, "config", "sources.example.yaml"))
     assert sources and all(s.hub and s.namespace for s in sources)
+    # Every derived name it produces has to be unique, which load_sources checks.
+    assert len({s.function_name for s in sources}) == len(sources)
+
+
+def test_the_real_sources_file_parses_if_it_exists():
+    """It ships inside the deployment, so a typo in it takes the whole app down
+    at cold start. Parse it here instead - when there is one to parse."""
+    path = os.path.join(REPO, "config", "sources.yaml")
+    if not os.path.exists(path):
+        pytest.skip("no config/sources.yaml on this checkout (it is gitignored)")
+    assert all(s.hub and s.namespace for s in load_sources(path))
 
 
 def test_a_source_only_has_to_name_its_namespace_and_hub(tmp_path):
     f = tmp_path / "s.yaml"
-    f.write_text("namespaces:\n  - namespace: poc\n    hubs:\n      - hub: logs-in\n")
-    assert load_sources(str(f)) == [Source(hub="logs-in", namespace="poc")]
+    f.write_text("namespaces:\n  - namespace: platform\n    hubs:\n      - hub: logs-in\n")
+    assert load_sources(str(f)) == [Source(hub="logs-in", namespace="platform")]
 
 
 def test_per_source_overrides_are_read(tmp_path):
     f = tmp_path / "s.yaml"
     f.write_text(
         "namespaces:\n"
-        "  - namespace: poc\n"
+        "  - namespace: platform\n"
         "    hubs:\n"
         "      - hub: azure-in\n"
         "  - namespace: network\n"
@@ -59,12 +72,13 @@ def test_a_typo_in_sources_yaml_is_an_error_not_a_shrug(tmp_path):
     """Silently ignoring `log_type_feild:` would mean routing on the default and
     no alerts, with nothing anywhere saying why."""
     f = tmp_path / "s.yaml"
-    f.write_text("namespaces:\n  - namespace: poc\n    hubs:\n"
+    f.write_text("namespaces:\n  - namespace: platform\n    hubs:\n"
                  "      - hub: a\n        log_type_feild: Category\n")
     with pytest.raises(ValueError, match="log_type_feild"):
         load_sources(str(f))
 
-    f.write_text("namespaces:\n  - namespace: poc\n    hubs:\n      - log_type_field: Category\n")
+    f.write_text("namespaces:\n  - namespace: platform\n    hubs:\n"
+                 "      - log_type_field: Category\n")
     with pytest.raises(ValueError, match="needs a `hub:`"):
         load_sources(str(f))
 
@@ -89,11 +103,23 @@ def test_a_namespace_used_twice_is_rejected(tmp_path):
         load_sources(str(f))
 
 
-def test_a_hub_used_twice_in_one_namespace_is_rejected(tmp_path):
+def test_a_hub_used_twice_on_one_consumer_group_is_rejected(tmp_path):
     f = tmp_path / "s.yaml"
     f.write_text("namespaces:\n  - namespace: net\n    hubs:\n      - hub: a\n      - hub: a\n")
     with pytest.raises(ValueError, match="listed twice"):
         load_sources(str(f))
+
+
+def test_the_same_hub_on_two_consumer_groups_is_allowed(tmp_path):
+    """The documented way to run two functions over one hub - a second reader
+    that doesn't steal partitions from the first."""
+    f = tmp_path / "s.yaml"
+    f.write_text("namespaces:\n  - namespace: net\n    hubs:\n"
+                 "      - hub: a\n"
+                 "      - hub: a\n        consumer_group: pyre-secondary\n")
+    first, second = load_sources(str(f))
+    assert first.function_name == "detect_net_a"
+    assert second.function_name == "detect_net_a_pyre_secondary"
 
 
 def test_two_sources_that_would_share_a_function_name_are_rejected(tmp_path):
@@ -139,6 +165,83 @@ def test_check_eventhub_settings_names_the_missing_or_mismatched_namespace(monke
     assert check_eventhub_settings([source]) == []
 
 
+# ---- the settings surface ---------------------------------------------------
+
+def _clear(monkeypatch, *names):
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_every_implementation_choice_is_a_named_value_not_a_presence_check(monkeypatch):
+    """Two settings that can disagree about which one wins is the mode confusion
+    this design removes: the selector alone decides, and the URL beside it is
+    only data."""
+    _clear(monkeypatch, "DETECTIONS_SOURCE", "DETECTIONS_BLOB_ACCOUNT_URL")
+
+    # The default is `blob`: a deployed instance is the normal case, and a
+    # missing setting must not quietly read an empty local folder.
+    assert RuntimeConfig(sources=[]).detections_source == "blob"
+
+    local = RuntimeConfig(sources=[], detections_source="local", detections_local_dir=DAC,
+                          detections_blob_account_url="https://acct.blob.core.windows.net")
+    assert isinstance(source_from_config(local), LocalBundleSource)
+
+    blob = RuntimeConfig(sources=[], detections_source="blob",
+                         detections_blob_account_url="https://acct.blob.core.windows.net")
+    assert isinstance(source_from_config(blob), BlobBundleSource)
+
+
+def test_an_unrecognised_selector_value_falls_back_and_is_reported(monkeypatch):
+    """It must not raise: this runs during the import of function_app.py, where
+    an exception means Azure shows an EMPTY function list with no obvious cause."""
+    monkeypatch.setenv("SIGNAL_DESTINATION", "blobb")
+    cfg = RuntimeConfig(sources=[])
+    assert cfg.signal_destination == "none"                  # the default, not a crash
+    assert any("SIGNAL_DESTINATION is 'blobb'" in p for p in cfg.problems())
+
+
+def test_an_unparseable_number_falls_back_and_is_reported(monkeypatch):
+    """Same reason. One typo'd app setting used to take the whole app down at
+    import time."""
+    monkeypatch.setenv("DETECTIONS_REFRESH_SECONDS", "sixty")
+    cfg = RuntimeConfig(sources=[])
+    assert cfg.detections_refresh_seconds == 60
+    assert any("DETECTIONS_REFRESH_SECONDS is 'sixty'" in p for p in cfg.problems())
+
+
+def test_no_log_sources_is_a_named_problem(monkeypatch):
+    """The hazard of gitignoring sources.yaml: a deploy from a clean clone would
+    otherwise ship an app with zero triggers and no obvious symptom."""
+    problems = RuntimeConfig(sources=[]).problems()
+    assert any("no log sources" in p and "sources.example.yaml" in p for p in problems)
+
+
+def test_a_fully_configured_instance_reports_no_problems(monkeypatch):
+    for name in ("DETECTIONS_SOURCE", "SIGNAL_DESTINATION", "ALERT_DESTINATION",
+                 "STATE_BACKEND", "DETECTIONS_REFRESH_SECONDS", "HTTP_TIMEOUT_SECONDS",
+                 "REDIS_PORT", "ALERT_STORM_LIMIT_PER_HOUR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EVENTHUB_PLATFORM__fullyQualifiedNamespace", "ns.servicebus.windows.net")
+
+    cfg = RuntimeConfig(
+        sources=[Source(hub="a", namespace="platform")],
+        detections_source="blob", detections_blob_account_url="https://acct.blob.core.windows.net",
+        signal_destination="blob", signal_blob_account_url="https://acct.blob.core.windows.net",
+        alert_destination="http", alert_http_url="https://siem.example/alerts",
+        state_backend="redis", redis_host="cache.redis.cache.windows.net")
+    assert cfg.problems() == []
+
+
+def test_state_backend_redis_without_a_host_is_reported_not_fatal():
+    """Detection with per-worker state beats no detection at all, but it must be
+    said out loud - thresholds silently stop being shared across workers."""
+    from pyre_engine.state import build_state_store
+
+    cfg = RuntimeConfig(sources=[], state_backend="redis", redis_host="")
+    assert any("REDIS_HOST is not set" in p for p in cfg.problems())
+    assert build_state_store(cfg) is not None                # falls back, doesn't raise
+
+
 # ---- loading a bundle -------------------------------------------------------
 
 def test_the_starter_dac_loads_and_indexes_by_log_type():
@@ -148,6 +251,25 @@ def test_the_starter_dac_loads_and_indexes_by_log_type():
     assert det.id == "Azure.EventHub.AuthFailure"
     assert det.threshold == 3 and det.dedup_period_seconds == 3600
     assert reg.for_log_type("Nothing.Here") == []
+
+
+def test_descriptive_metadata_is_read_and_defaulted(tmp_path):
+    """These do not change what fires - they travel on the alert so a responder
+    gets the runbook with the page. Every one has to be optional."""
+    reg = BundleLoader(LocalBundleSource(DAC), refresh_seconds=0).get()
+    det = reg.for_log_type("RuntimeAuditLogs")[0]
+    assert det.display_name == "Repeated Event Hub Authorization Failures"
+    assert det.description and det.runbook and det.reference
+    assert det.tags == ["Azure", "EventHub"]
+    assert det.reports == {"MITRE ATT&CK": ["TA0006:T1110"]}
+
+    (tmp_path / "m.py").write_text("def rule(e): return True\n")
+    (tmp_path / "m.yml").write_text(
+        "AnalysisType: rule\nRuleID: bare\nFilename: m.py\nLogTypes: [T]\n")
+    bare = Registry.from_bundle(str(tmp_path)).for_log_type("T")[0]
+    assert bare.display_name == "bare"          # falls back to the RuleID
+    assert (bare.description, bare.runbook, bare.reference) == ("", "", "")
+    assert bare.tags == [] and bare.reports == {}
 
 
 def test_a_broken_detection_is_skipped_not_fatal(tmp_path):

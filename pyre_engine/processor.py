@@ -11,19 +11,29 @@ shapes still run one copy of this code.
 
 All state operations for a batch are pipelined: a 256-event batch costs a few
 round-trips, not 256.
+
+LOGGING is one INFO line per invocation, whatever the volume:
+
+    batch platform/applog msgs=3 events=7 new=7 signals=4 alerts=1 12ms
+
+Anything that would otherwise be per-event - a redelivery, a detection raising,
+a log type with no detections behind it - is counted during the batch and
+reported once, with the values you would need to fix it. That is deliberate: the
+per-event version of these lines is loudest exactly when something is wrong and
+the logs are least readable. See docs/operations.md.
 """
 import hashlib
 import json
 import logging
-import uuid
+import time
 from datetime import datetime, timezone
 
 from .bundle import source_from_config
 from .config import RuntimeConfig, Source
 from .event import Event
-from .records import Alert, RecordWriter, Signal
+from .records import RecordWriter, build_alert, build_signal, normalize_indicators, now_iso
 from .registry import BundleLoader
-from .sinks import build_sink
+from .sinks import build_router
 from .state import build_state_store
 
 log = logging.getLogger("pyre.processor")
@@ -36,8 +46,15 @@ class Processor:
         # chosen from config alone. They're injectable purely so a test or local
         # run can substitute a fake; nothing below behaves differently for it.
         self.state = state or build_state_store(cfg)
-        self.records = RecordWriter(sink or build_sink(cfg))
-        self.loader = BundleLoader(source_from_config(cfg), cfg.dac_refresh_seconds)
+        self.sink = sink or build_router(cfg)
+        self.records = RecordWriter(self.sink)
+        self.loader = BundleLoader(source_from_config(cfg), cfg.detections_refresh_seconds)
+
+    def destinations(self) -> dict:
+        """Where each stream actually resolved, redacted, for /health. An
+        injected test sink has no such notion, hence the fallback."""
+        describe = getattr(self.sink, "describe", None)
+        return describe() if callable(describe) else {"signal": "injected", "alert": "injected"}
 
     def process_batch(self, messages: list[str], source: Source,
                       event_ids: list[str] | None = None) -> None:
@@ -48,8 +65,21 @@ class Processor:
         guard keys on. Omitted (the `ingest` endpoint, local runs), the message
         body is hashed instead.
         """
+        started = time.monotonic()
         registry = self.loader.get()          # hot-reloads on a detection publish
         hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+        processed_time = now_iso()
+
+        # Per-batch tallies. Every one of these would otherwise be a per-event
+        # log line; counted here, they cost nothing and become one readable
+        # summary at the end.
+        unparseable = 0
+        redelivered = 0
+        no_log_type = 0
+        unrouted: dict[str, int] = {}
+        det_errors: dict[str, int] = {}
+        storm_dropped: dict[str, int] = {}
+        n_signals = n_alerts = 0
 
         # --- phase 0: messages -> records ----------------------------------
         # One transport message can carry many log records. This is where "a
@@ -60,7 +90,7 @@ class Processor:
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:
-                log.warning("skipping message %d: not valid JSON", idx)
+                unparseable += 1
                 continue
             base = (event_ids[idx] if event_ids and idx < len(event_ids) else None) \
                 or hashlib.sha1(raw.encode("utf-8")).hexdigest()
@@ -83,15 +113,10 @@ class Processor:
         # --- phase 2: route and evaluate ------------------------------------
         pipe = self.state.pipeline()
         pending = []                           # matches awaiting an alert decision
-        # Per-batch routing tally. One dict, no extra calls, and it's the
-        # difference between "no alerts and no idea why" and a log line naming
-        # the exact values that arrived with no detection behind them.
-        no_log_type = 0
-        unrouted: dict[str, int] = {}
 
         for (eid, record), is_new in zip(candidates, first_sighting):
             if not is_new:
-                log.info("skipping already-processed event %s (redelivery)", eid)
+                redelivered += 1
                 continue
             event = Event(record)
             log_type = event.get(source.log_type_field)
@@ -108,18 +133,23 @@ class Processor:
                     if not det.rule(event):
                         continue
                 except Exception:
-                    log.exception("detection %s raised on a %s event; skipping it for this event",
-                                  det.id, log_type)
+                    # One traceback per detection per batch, then a count. A
+                    # detection that raises on every event would otherwise emit
+                    # a full stack trace per event, unthrottled.
+                    if det.id not in det_errors:
+                        log.exception("detection %s raised on a %s event; skipping it for "
+                                      "this event", det.id, log_type)
+                    det_errors[det.id] = det_errors.get(det.id, 0) + 1
                     continue
 
                 dedup_str = (det.dedup(event) or det.title(event))[:1000]
+                indicators = normalize_indicators(det.indicators(event))
                 # ALWAYS a signal on match. Whether it ends up inside an alert
                 # isn't known until the thresholds below are evaluated, and
                 # nothing is flushed yet, so p_alert_id is filled in later.
-                signal = self.records.add_signal(Signal(
-                    detection_id=det.id, log_type=log_type, dedup_string=dedup_str,
-                    event_time=event.get(source.event_time_field, ""), event=event,
-                ))
+                signal = self.records.add(build_signal(
+                    det, source, event, log_type, dedup_str, indicators, processed_time))
+                n_signals += 1
                 if not det.create_alert:
                     continue
 
@@ -129,19 +159,11 @@ class Processor:
                 if unique_val is not None:
                     self.state.bump_unique(pipe, det.id, dedup_str, str(unique_val),
                                            det.dedup_period_seconds)
-                    pending.append((det, event, dedup_str, "unique", signal))
+                    mode = "unique"
                 else:
                     self.state.bump_dedup(pipe, det.id, dedup_str, det.dedup_period_seconds)
-                    pending.append((det, event, dedup_str, "count", signal))
-
-        if no_log_type:
-            log.warning("%d event(s) from hub '%s' had no value in the log-type field '%s' - "
-                        "check log_type_field in config/sources.yaml against your data",
-                        no_log_type, source.hub, source.log_type_field)
-        if unrouted:
-            log.warning("no detections are registered for these log-type values: %s. "
-                        "A detection's YAML LogTypes must contain the value exactly.",
-                        ", ".join(f"{lt} ({n} event(s))" for lt, n in sorted(unrouted.items())))
+                    mode = "count"
+                pending.append((det, event, log_type, dedup_str, mode, signal, indicators))
 
         results = pipe.execute()               # one round-trip for every dedup/unique bump
 
@@ -149,7 +171,7 @@ class Processor:
         # "count" mode pipelined [incr, expire]; "unique" pipelined
         # [pfadd, expire, pfcount]. Read the counts back by position.
         i = 0
-        for det, event, dedup_str, mode, signal in pending:
+        for det, event, log_type, dedup_str, mode, signal, indicators in pending:
             if mode == "unique":
                 count = results[i + 2]; i += 3
             else:
@@ -163,25 +185,60 @@ class Processor:
                 # "which matches made up this alert?".
                 signal["p_alert_id"] = existing
                 continue
-            alert = Alert(
-                alert_id=str(uuid.uuid4()), detection_id=det.id,
-                title=det.title(event), severity=det.severity(event),
-                dedup_string=dedup_str, context=det.alert_context(event),
-                first_event_time=event.get(source.event_time_field, ""),
-            )
-            if not self.state.register_alert(det.id, dedup_str, alert.alert_id,
+            # The storm check comes BEFORE the claim. Claiming first would leave
+            # an `alert:` marker behind for a storm-dropped alert, and every
+            # later match in the window would then be stamped with an alert id
+            # that was never written anywhere.
+            if not self.state.storm_ok(det.id, hour, self.cfg.alert_storm_limit_per_hour):
+                storm_dropped[det.id] = storm_dropped.get(det.id, 0) + 1
+                continue
+            alert = build_alert(det, source, event, log_type, dedup_str, indicators,
+                                signal["p_signal_id"], count, processed_time)
+            if not self.state.register_alert(det.id, dedup_str, alert["p_alert_id"],
                                              det.dedup_period_seconds):
                 # Another worker won the atomic claim; this match is theirs.
                 signal["p_alert_id"] = self.state.alert_exists(det.id, dedup_str)
                 continue
-            if not self.state.storm_ok(det.id, hour, self.cfg.storm_limit_per_hour):
-                log.error("storm limit hit for %s (>%s alerts in hour %s); alert dropped, "
-                          "signal retained", det.id, self.cfg.storm_limit_per_hour, hour)
-                continue
-            signal["p_alert_id"] = alert.alert_id
-            self.records.add_alert(alert)
+            signal["p_alert_id"] = alert["p_alert_id"]
+            self.records.add(alert)
+            n_alerts += 1
 
         self.records.flush()                   # one write-back per invocation
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        log.info("batch %s msgs=%d events=%d new=%d signals=%d alerts=%d %dms",
+                 source.id, len(messages), len(candidates),
+                 len(candidates) - redelivered, n_signals, n_alerts, elapsed_ms)
+        self._log_anomalies(source, unparseable, redelivered, no_log_type, unrouted,
+                            det_errors, storm_dropped)
+
+    def _log_anomalies(self, source, unparseable, redelivered, no_log_type, unrouted,
+                       det_errors, storm_dropped) -> None:
+        """One line per KIND of problem in this batch, naming the values needed
+        to fix it. Silent when the batch was clean, which is the normal case."""
+        if unparseable:
+            log.warning("%s: %d message(s) were not valid JSON and were skipped",
+                        source.id, unparseable)
+        if redelivered:
+            log.info("%s: %d event(s) already processed (Event Hubs redelivery); skipped",
+                     source.id, redelivered)
+        if no_log_type:
+            log.warning("%s: %d event(s) had no value in the log-type field %r - check "
+                        "log_type_field in config/sources.yaml against your data",
+                        source.id, no_log_type, source.log_type_field)
+        if unrouted:
+            log.warning("%s: no detections are registered for these log-type values: %s. "
+                        "A detection's YAML LogTypes must contain the value exactly.",
+                        source.id,
+                        ", ".join(f"{lt} ({n} event(s))" for lt, n in sorted(unrouted.items())))
+        if det_errors:
+            log.warning("%s: detection(s) raised and were skipped for those events: %s",
+                        source.id,
+                        ", ".join(f"{d} ({n}x)" for d, n in sorted(det_errors.items())))
+        if storm_dropped:
+            log.error("%s: alert storm limit (%d/hour) reached; alert(s) dropped, signals "
+                      "retained: %s", source.id, self.cfg.alert_storm_limit_per_hour,
+                      ", ".join(f"{d} ({n}x)" for d, n in sorted(storm_dropped.items())))
 
 
 def _unwrap(parsed, envelope_field: str) -> list:

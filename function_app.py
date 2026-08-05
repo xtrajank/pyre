@@ -8,9 +8,9 @@ Three kinds of function:
                  file - there is no code to write, however many namespaces or
                  hubs you have.
   health         GET. Which bundle is loaded, how many detections, which log
-                 types they cover, which field each source routes on, and
-                 whether every namespace's connection setting actually exists.
-                 The first thing to check when nothing alerts.
+                 types they cover, where each stream writes, and every way the
+                 settings contradict themselves. The first thing to check when
+                 nothing alerts.
   ingest         POST logs straight into the processor, bypassing Event Hubs.
                  Proves the detection half in isolation when you're working out
                  which half is broken.
@@ -21,7 +21,7 @@ from typing import List
 
 import azure.functions as func
 
-from pyre_engine.config import RuntimeConfig, check_eventhub_settings, identity_state
+from pyre_engine.config import RuntimeConfig, identity_state
 from pyre_engine.processor import Processor
 
 log = logging.getLogger("pyre.host")
@@ -30,13 +30,19 @@ app = func.FunctionApp()
 
 # Built once per worker process (cold start) and reused across invocations.
 _config = RuntimeConfig()
+
+# The Functions host owns the root handler; this only sets how much of what the
+# engine emits reaches it. Applied to the `pyre.*` tree alone so a level change
+# never turns the Azure SDKs' own logging on or off by accident.
+logging.getLogger("pyre").setLevel(getattr(logging, _config.log_level, logging.INFO))
+
 _processor = Processor(_config)
 
 # Keyed by "namespace/hub" (always unique) and, as a convenience, by the bare
 # hub name too - but only when that hub name isn't shared by another
 # namespace, so an ambiguous bare name fails clearly instead of silently
 # resolving to whichever source happened to register last.
-_sources = {f"{s.namespace}/{s.hub}": s for s in _config.sources}
+_sources = {s.id: s for s in _config.sources}
 _hub_counts: dict[str, int] = {}
 for _s in _config.sources:
     _hub_counts[_s.hub] = _hub_counts.get(_s.hub, 0) + 1
@@ -76,9 +82,13 @@ def _register(source):
 for _source in _config.sources:
     _register(_source)
 
-if not _config.sources:
-    log.error("no log sources: config/sources.yaml is empty or missing. "
-              "The HTTP functions still work, but nothing is being ingested.")
+# Everything the settings contradict, said once, at the only moment someone is
+# reading the startup log. /health repeats it on demand.
+for _problem in _config.problems():
+    log.error("configuration: %s", _problem)
+log.info("pyre started: %d source(s), detections from %s, signals -> %s, alerts -> %s",
+         len(_config.sources), _config.detections_source,
+         _config.signal_destination, _config.alert_destination)
 
 
 @app.function_name(name="health")
@@ -87,18 +97,20 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
     """Answers "is this thing actually loaded, and with what?" without sending an
     event.
 
-    Two fields carry the answer to almost every "why no alerts?": `detections`
-    (did the bundle load?) and `log_types` (do the values your data carries in
-    each source's `log_type_field` appear in this list, exactly?).
+    Read in this order:
 
-    `eventhub_settings` covers the OTHER most common setup failure: a
-    namespace whose app setting was never created, or was created with a name
-    that doesn't match `sources.yaml`. Empty means every namespace resolves.
-
-    `identity` is what to read FIRST when this returns 503 with a
-    `DefaultAzureCredential` error: `endpoint: false` means the app has no
-    managed identity at all, which breaks the bundle, the output blob and the
-    Event Hub triggers together and looks like three separate faults.
+      `problems`    every setting that contradicts another, named. Empty is the
+                    goal. A destination selected with nowhere to send it lives
+                    here, and is otherwise indistinguishable from a healthy app
+                    that happens to produce no output.
+      `identity`    what DefaultAzureCredential has to work with. Read this
+                    FIRST on a 503 mentioning a token: `endpoint: false` means
+                    the app has no managed identity at all, which breaks the
+                    bundle, the output blobs and the Event Hub triggers together
+                    and looks like three separate faults.
+      `detections`  did the bundle load?
+      `log_types`   do the values your data carries in each source's
+                    `log_type_field` appear in this list, EXACTLY?
 
     What this CANNOT tell you is whether the Event Hub listeners actually
     attached. The listener lives in the Functions host, not in this worker
@@ -106,38 +118,48 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
     them is connected. That's a separate check, and
     docs/troubleshooting.md#is-the-trigger-actually-listening is where it lives.
     """
+    problems = _config.problems()
     body = {
-        "env": _config.env,
+        "instance": _config.instance_label or None,
         "state": _config.state_backend,
-        "output": _config.output_http_url or
-                  (f"{_config.output_blob_account_url}/{_config.output_blob_container}"
-                   if _config.output_blob_account_url else None),
+        "detections_source": _config.detections_source,
+        "destinations": _processor.destinations(),
         "sources": [
             # `connection` and `consumer_group` are what the HOST binds with, and
             # neither is typed in sources.yaml - one is derived from `namespace`,
             # the other defaults. Reporting them is what turns "which app setting
             # does this trigger actually want?" and "which consumer group is it
             # claiming?" into something you can read instead of derive.
-            {"namespace": s.namespace, "hub": s.hub, "function": s.function_name,
+            {"id": s.id, "namespace": s.namespace, "hub": s.hub, "function": s.function_name,
              "connection": s.connection, "consumer_group": s.consumer_group,
              "log_type_field": s.log_type_field,
              "event_time_field": s.event_time_field, "envelope_field": s.envelope_field or None}
             for s in _config.sources
         ],
-        "eventhub_settings": check_eventhub_settings(_config.sources),
         "identity": identity_state(),
+        "problems": problems,
     }
     try:
         registry = _processor.loader.get()
         body["bundle_version"] = _processor.loader.version
         body.update(registry.stats())
-        body["status"] = "ok" if body["detections"] else "no-detections-loaded"
     except Exception as exc:
         # A cold start with no published bundle is the most common setup failure.
         # Say so here rather than only in the trigger's logs.
-        body["status"] = "bundle-load-failed"
+        body["detections"] = 0
         body["error"] = f"{type(exc).__name__}: {exc}"
-    code = 200 if body.get("status") == "ok" else 503
+
+    if not _config.sources:
+        body["status"] = "no-sources-configured"
+    elif "error" in body:
+        body["status"] = "bundle-load-failed"
+    elif not body.get("detections"):
+        body["status"] = "no-detections-loaded"
+    elif problems:
+        body["status"] = "configuration-problems"
+    else:
+        body["status"] = "ok"
+    code = 200 if body["status"] == "ok" else 503
     return func.HttpResponse(json.dumps(body, indent=2), status_code=code,
                              mimetype="application/json")
 
@@ -184,5 +206,5 @@ def ingest(req: func.HttpRequest) -> func.HttpResponse:
         log.exception("ingest failed")
         return func.HttpResponse(json.dumps({"error": f"{type(exc).__name__}: {exc}"}),
                                  status_code=500, mimetype="application/json")
-    return func.HttpResponse(json.dumps({"accepted": len(messages), "source": source.hub}),
+    return func.HttpResponse(json.dumps({"accepted": len(messages), "source": source.id}),
                              status_code=202, mimetype="application/json")

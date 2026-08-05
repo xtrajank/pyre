@@ -6,8 +6,10 @@ here, separately from the engine, so changing a rule never redeploys code.
 
 ```
 dac/
-├── publish.py                  build + validate + upload to Blob
-├── azure-pipelines.yml         push to main -> published automatically
+├── publish.py                        build + validate + upload to Blob
+├── azure-pipelines.yml               push to main -> published automatically
+├── azure-pipelines-publish.yml       one stage per instance you publish to
+├── azure-pipelines-publish-steps.yml
 ├── detections/
 │   └── azure_eventhub/
 │       ├── eventhub_auth_failure.yml     metadata
@@ -20,7 +22,7 @@ dac/
 ## Publish
 
 ```bash
-python publish.py                                                # build + validate -> dist/
+python publish.py                                                    # build + validate -> dist/
 python publish.py --upload https://<account>.blob.core.windows.net   # and publish
 ```
 
@@ -29,8 +31,8 @@ Code / Azure sign-in) or as a pipeline's service connection. Without it the two
 files land in `dist/` and you upload them in the portal — the zip first, then
 `current.json`.
 
-Running workers reload within `DAC_REFRESH_SECONDS` (default 60). Nothing is
-redeployed. Check `/health` on the Function App: `bundle_version` will have
+Running workers reload within `DETECTIONS_REFRESH_SECONDS` (default 60). Nothing
+is redeployed. Check `/health` on the Function App: `bundle_version` will have
 changed.
 
 ## Writing a detection
@@ -53,9 +55,36 @@ LogTypes:
   - RuntimeAuditLogs          # must match your data EXACTLY (case-sensitive)
 Threshold: 3                  # matches before an alert fires; 1 = first match
 DedupPeriodMinutes: 60
+CreateAlert: true             # false = record signals, never page
 ```
 
-Optional functions on the `.py`, each taking `event`:
+### Metadata that travels on the alert
+
+None of these change whether the rule fires. They ride on every alert, so a
+responder gets the context **with the page** instead of coming back here to read
+the detection.
+
+```yaml
+DisplayName: "Repeated Event Hub Authorization Failures"
+Description: Three or more failed authorization attempts from one client.
+Runbook: >
+  Check whether the client IP and identity are expected senders for this
+  namespace. Usually a stale key or a lost role assignment - but it looks
+  exactly like probing too.
+Reference: https://learn.microsoft.com/azure/event-hubs/...
+Tags: [Azure, EventHub]
+Reports:
+  MITRE ATT&CK:
+    - "TA0006:T1110"
+```
+
+They land as `p_detection_name`, `p_description`, `p_runbook`, `p_reference`,
+`p_tags` and `p_reports` — see
+[signals-and-alerts.md](../docs/signals-and-alerts.md).
+
+### Optional functions on the `.py`
+
+Each takes `event`:
 
 | Function | Returns | Default if absent |
 |---|---|---|
@@ -64,9 +93,24 @@ Optional functions on the `.py`, each taking `event`:
 | `severity(event)` | override per event | the YAML `Severity` |
 | `alert_context(event)` | a dict attached to the alert | `{}` |
 | `unique(event)` | count DISTINCT values instead of matches | off |
+| `indicators(event)` | pivot values as `p_any_*` fields | none |
 
 `event` is a dict with two extras: `event.deep_get("a", "b")` walks nested keys
 safely, and `event.lookup(table, key)` reads `p_enrichment`.
+
+**`indicators()`** is what makes "everything involving this IP" work across log
+types that spell the field differently:
+
+```python
+def indicators(event):
+    return {
+        "ip_addresses": [event.get("ClientIp")],
+        "usernames":    [event.get("UserPrincipalName")],
+    }
+```
+
+Values are normalized to a sorted list of strings and empties are dropped. Pick
+key names your destination can index — there is no fixed vocabulary.
 
 ### The four things that silently break a bundle
 
@@ -103,10 +147,16 @@ def test_internal_failure_ignored():
 Put those in `tests/` — the bundler excludes that folder, so they never ship.
 
 To run the whole engine over a real log sample (routing, thresholds, dedup, the
-lot), use the pyre repo's `python tools/run_local.py --bundle <this repo>`.
+lot), use the pyre repo's:
+
+```powershell
+python tools/run_local.py --bundle <this repo> --file real-sample.json
+```
 
 ## Continuous publishing
 
-`azure-pipelines.yml` is ready to go: point an Azure DevOps pipeline at it, set
-the two account URLs and the service connection name at the top, and every push
-to `main` validates, publishes to dev, then waits for approval before prod.
+`azure-pipelines.yml` is ready to go: point an Azure DevOps pipeline at it and
+edit the `- template:` blocks at the bottom with your service connections and
+storage account URLs. **Adding another pyre instance to publish to is one more
+block** — each gets its own service connection, and any of them can be gated on
+an approval check.

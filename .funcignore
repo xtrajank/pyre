@@ -16,8 +16,12 @@ tests/
 docs/
 tools/
 dac/
+infra/
 dist/
 README.md
-azure-pipelines.yml
+*.md
+*.example
+*.example.yaml
+azure-pipelines*.yml
+requirements-dev.txt
 local.settings.json
-local.settings.json.example

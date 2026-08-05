@@ -1,17 +1,19 @@
 # Push a detection to main -> the bundle is rebuilt and published to Blob ->
-# running workers reload it within DAC_REFRESH_SECONDS. Nothing is redeployed.
+# running workers reload it within DETECTIONS_REFRESH_SECONDS. Nothing is
+# redeployed.
 #
 # SETUP (once, in Azure DevOps):
 #   1. Pipelines -> New -> Azure Repos Git -> this repo -> Existing YAML file
-#   2. Edit the variables below to your storage account names.
-#   3. Create a service connection per environment (Project settings -> Service
-#      connections -> Azure Resource Manager) named as `azureSubscription` below.
-#   4. Give each service connection's identity the role
-#      `Storage Blob Data Contributor` on that storage account.
+#   2. Create one Azure Resource Manager service connection per pyre instance
+#      you publish to (Project settings -> Service connections).
+#   3. Give each service connection's identity the role
+#      `Storage Blob Data Contributor` on that instance's storage account.
+#   4. Edit the publish stages below with those names and account URLs.
+#   5. For any instance that should be a decision rather than a push, create a
+#      Pipelines -> Environments entry with an approval check and name it in
+#      that stage's `environment:`.
 #
-# The dev stage runs on every push to main; prod waits for an approval you
-# configure on the "prod" environment (Pipelines -> Environments -> prod ->
-# Approvals and checks).
+# ADDING AN INSTANCE is one more `- template:` block.
 
 trigger:
   branches:
@@ -19,11 +21,6 @@ trigger:
 
 pool:
   vmImage: ubuntu-latest
-
-variables:
-  azureSubscription: pyre-dev              # ARM service connection name
-  devAccountUrl: https://pyredevstor.blob.core.windows.net
-  prodAccountUrl: https://pyreprodstor.blob.core.windows.net
 
 stages:
   - stage: validate
@@ -36,7 +33,7 @@ stages:
             displayName: install
           # Build without --upload: this validates every detection and fails the
           # push if a bundle would load nothing. Cheap, and it runs before any
-          # environment sees the change.
+          # instance sees the change.
           - script: python publish.py
             displayName: validate + build bundle
           # Detection unit tests, if you have any (tests/ is excluded from the
@@ -45,50 +42,18 @@ stages:
               if [ -d tests ]; then pytest tests -q; else echo "no tests/ - skipping"; fi
             displayName: detection tests
 
-  - stage: dev
-    dependsOn: validate
-    jobs:
-      - job: publish_dev
-        steps:
-          - task: UsePythonVersion@0
-            inputs: { versionSpec: "3.11" }
-          - script: pip install pyyaml azure-identity azure-storage-blob
-            displayName: install
-          - task: AzureCLI@2
-            displayName: publish to dev
-            inputs:
-              azureSubscription: $(azureSubscription)
-              scriptType: bash
-              scriptLocation: inlineScript
-              # addSpnToEnvironment exports AZURE_CLIENT_ID / AZURE_TENANT_ID /
-              # servicePrincipalKey, which DefaultAzureCredential inside
-              # publish.py then picks up. No secret is written to a file.
-              addSpnToEnvironment: true
-              inlineScript: |
-                export AZURE_CLIENT_SECRET="$servicePrincipalKey"
-                python publish.py --upload $(devAccountUrl)
+  # --- one block per instance ------------------------------------------------
+  - template: azure-pipelines-publish.yml
+    parameters:
+      instance: staging
+      azureSubscription: <staging-service-connection>
+      accountUrl: https://<staging-account>.blob.core.windows.net
+      dependsOn: [validate]
 
-  - stage: prod
-    dependsOn: dev
-    jobs:
-      - deployment: publish_prod
-        environment: prod            # attach an approval check to this
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - checkout: self
-                - task: UsePythonVersion@0
-                  inputs: { versionSpec: "3.11" }
-                - script: pip install pyyaml azure-identity azure-storage-blob
-                  displayName: install
-                - task: AzureCLI@2
-                  displayName: publish to prod
-                  inputs:
-                    azureSubscription: $(azureSubscription)
-                    scriptType: bash
-                    scriptLocation: inlineScript
-                    addSpnToEnvironment: true
-                    inlineScript: |
-                      export AZURE_CLIENT_SECRET="$servicePrincipalKey"
-                      python publish.py --upload $(prodAccountUrl)
+  - template: azure-pipelines-publish.yml
+    parameters:
+      instance: production
+      azureSubscription: <production-service-connection>
+      accountUrl: https://<production-account>.blob.core.windows.net
+      environment: production
+      dependsOn: [publish_staging]

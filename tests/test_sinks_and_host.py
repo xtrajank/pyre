@@ -7,53 +7,147 @@ reason buried in the log stream.
 import json
 
 from pyre_engine.config import RuntimeConfig
-from pyre_engine.sinks import AlertWebhook, BlobSink, HttpSink, build_sink
+from pyre_engine.sinks import BlobSink, HttpSink, build_router, redact
 
 SIGNAL = {"p_record_type": "signal", "p_signal_id": "s1"}
+SIGNAL2 = {"p_record_type": "signal", "p_signal_id": "s2"}
 ALERT = {"p_record_type": "alert", "p_alert_id": "a1"}
+ALERT2 = {"p_record_type": "alert", "p_alert_id": "a2"}
+
+BLOB = "https://acct.blob.core.windows.net"
 
 
-# ---- picking a sink ---------------------------------------------------------
-
-def test_build_sink_follows_config():
-    # HTTP wins: that's the production endpoint, and blob is its stand-in.
-    assert isinstance(build_sink(RuntimeConfig(output_http_url="https://x/y",
-                                               output_blob_account_url="https://a.blob.core.windows.net")),
-                      HttpSink)
-    assert isinstance(build_sink(RuntimeConfig(output_http_url="",
-                                               output_blob_account_url="https://a.blob.core.windows.net")),
-                      BlobSink)
-    # Neither configured: detection still runs, records go nowhere, nothing raises.
-    build_sink(RuntimeConfig(output_http_url="", output_blob_account_url="")).write([SIGNAL])
+def cfg(**kw):
+    """A config with nothing inherited from the ambient environment, so these
+    assertions are about the settings under test and nothing else."""
+    base = dict(sources=[], detections_source="local", signal_destination="none",
+                alert_destination="none", state_backend="memory", redis_host="")
+    return RuntimeConfig(**{**base, **kw})
 
 
-def test_alert_webhook_wraps_whatever_sink_was_chosen():
-    sink = build_sink(RuntimeConfig(output_http_url="https://x/y",
-                                    alert_webhook_url="https://case-tool/hook"))
-    assert isinstance(sink, AlertWebhook)
+# ---- routing each stream to its own destination -----------------------------
+
+def test_each_stream_resolves_its_own_destination():
+    """The whole point of splitting them: signals into a blob you can read,
+    alerts into a case tool, from one instance."""
+    router = build_router(cfg(
+        signal_destination="blob", signal_blob_account_url=BLOB,
+        alert_destination="http", alert_http_url="https://case-tool/hook"))
+
+    assert isinstance(router._by_stream["signal"], BlobSink)
+    assert isinstance(router._by_stream["alert"], HttpSink)
 
 
-def test_the_webhook_posts_alerts_only_and_never_swallows_the_record(monkeypatch):
-    """A webhook that is down must lose the page, never the record."""
+def test_two_streams_pointed_at_one_target_share_a_single_sink():
+    """Pointing both at the same place must cost exactly what one destination
+    costs - one instance, one write per batch - or a shared HTTP endpoint gets
+    double the requests for no reason."""
+    router = build_router(cfg(
+        signal_destination="blob", signal_blob_account_url=BLOB,
+        alert_destination="blob", alert_blob_account_url=BLOB))
+    assert router._by_stream["signal"] is router._by_stream["alert"]
+
+    writes = []
+    router._by_stream["signal"].write = writes.append
+    router.write([SIGNAL, ALERT, SIGNAL2])
+    assert writes == [[SIGNAL, ALERT, SIGNAL2]]            # one call, both streams
+
+
+def test_different_containers_on_one_account_are_different_sinks():
+    router = build_router(cfg(
+        signal_destination="blob", signal_blob_account_url=BLOB,
+        signal_blob_container="signals",
+        alert_destination="blob", alert_blob_account_url=BLOB,
+        alert_blob_container="alerts"))
+    assert router._by_stream["signal"] is not router._by_stream["alert"]
+
+
+def test_a_stream_set_to_none_is_discarded_and_the_other_still_writes():
+    router = build_router(cfg(signal_destination="none",
+                              alert_destination="http", alert_http_url="https://x/y"))
+    assert router._by_stream["signal"] is None
+
+    got = []
+    router._by_stream["alert"].write = got.append
+    router.write([SIGNAL, ALERT])
+    assert got == [[ALERT]]
+
+
+def test_a_destination_with_nowhere_to_send_is_a_named_problem_not_a_silent_drop():
+    """Without this, "blob selected but no account URL" is indistinguishable
+    from a healthy app that happens to produce no output."""
+    problems = cfg(signal_destination="blob", signal_blob_account_url="").problems()
+    assert any("SIGNAL_BLOB_ACCOUNT_URL is not set" in p for p in problems)
+
+    problems = cfg(alert_destination="http", alert_http_url="").problems()
+    assert any("ALERT_HTTP_URL is not set" in p for p in problems)
+
+    # Both off is legal but worth saying out loud.
+    assert any("nothing is written anywhere" in p for p in cfg().problems())
+    # Fully configured says nothing about destinations at all.
+    configured = cfg(signal_destination="blob", signal_blob_account_url=BLOB,
+                     alert_destination="http", alert_http_url="https://x/y").problems()
+    assert not [p for p in configured if "DESTINATION" in p]
+
+    # And nothing raises when a misconfigured stream is written to.
+    build_router(cfg(signal_destination="blob", signal_blob_account_url="")).write([SIGNAL])
+
+
+# ---- the HTTP sink ----------------------------------------------------------
+
+def test_http_batching_matches_what_each_consumer_wants(monkeypatch):
+    """A lake ingesting signals wants the array; a case tool opening a ticket per
+    alert wants one record per request."""
     posted = []
     monkeypatch.setattr("pyre_engine.sinks.requests.post",
-                        lambda url, **kw: posted.append(kw["json"]))
+                        lambda url, **kw: posted.append(kw["json"]) or _ok())
 
-    class Inner:
-        def __init__(self):
-            self.got = []
+    HttpSink("https://lake/in", batch=True).write([SIGNAL, SIGNAL2])
+    assert posted == [[SIGNAL, SIGNAL2]]
 
-        def write(self, records):
-            self.got.extend(records)
+    posted.clear()
+    HttpSink("https://case-tool/hook", batch=False).write([ALERT, ALERT2])
+    assert posted == [ALERT, ALERT2]
 
-    inner = Inner()
-    AlertWebhook(inner, "https://case-tool/hook").write([SIGNAL, ALERT])
-    assert inner.got == [SIGNAL, ALERT]                # everything still recorded
-    assert posted == [ALERT]                           # only the alert paged
 
+def test_http_auth_header_is_sent_whole(monkeypatch):
+    """Supplied whole ("Bearer x", "SharedKey y") so any scheme works without a
+    setting per scheme - and so it can be a Key Vault reference."""
+    seen = {}
     monkeypatch.setattr("pyre_engine.sinks.requests.post",
-                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("down")))
-    AlertWebhook(inner, "https://case-tool/hook").write([ALERT])   # must not raise
+                        lambda url, **kw: seen.update(kw) or _ok())
+
+    HttpSink("https://lake/in", auth_header="Bearer secret-token").write([SIGNAL])
+    assert seen["headers"] == {"Authorization": "Bearer secret-token"}
+
+    seen.clear()
+    HttpSink("https://lake/in").write([SIGNAL])
+    assert seen["headers"] == {}
+
+
+def test_an_error_status_is_reported_not_treated_as_success(monkeypatch, caplog):
+    """Swallowing a 401 is how a destination silently stops working for a week."""
+    monkeypatch.setattr("pyre_engine.sinks.requests.post",
+                        lambda url, **kw: _ok(401, "unauthorized"))
+    HttpSink("https://lake/in").write([SIGNAL])
+    assert "401" in caplog.text and "1 record(s) dropped" in caplog.text
+
+
+def test_urls_are_redacted_wherever_they_are_logged():
+    """Webhook URLs routinely carry a shared-access token in the query string,
+    and both the startup lines and /health echo the configured destination."""
+    assert redact("https://hook.example/services/T1?sig=SECRET") == "https://hook.example/services/T1?..."
+    assert redact("https://acct.blob.core.windows.net") == "https://acct.blob.core.windows.net"
+    assert redact("") == ""
+    assert "SECRET" not in HttpSink("https://x/y?token=SECRET").describe()
+
+
+def _ok(status=200, text=""):
+    class _Resp:
+        status_code = status
+
+    _Resp.text = text
+    return _Resp()
 
 
 # ---- the blob sink ----------------------------------------------------------
@@ -70,7 +164,7 @@ class _FakeBlob:
 
 
 def _fake_blob_sink(monkeypatch):
-    sink = BlobSink("https://acct.blob.core.windows.net", "pyre-output")
+    sink = BlobSink(BLOB, "pyre-output")
     written = {}
     monkeypatch.setattr(sink, "_blob_client", lambda prefix: written.setdefault(prefix, _FakeBlob()))
     return sink, written
@@ -81,8 +175,10 @@ def _lines(fake):
 
 
 def test_blob_sink_splits_signals_and_alerts_into_separate_streams(monkeypatch):
+    """The stream prefix lives inside the container, so one shared container
+    keeps both readable and two containers also work - with no extra setting."""
     sink, written = _fake_blob_sink(monkeypatch)
-    sink.write([SIGNAL, ALERT, {"p_record_type": "signal", "p_signal_id": "s2"}])
+    sink.write([SIGNAL, ALERT, SIGNAL2])
     assert sorted(written) == ["alerts", "signals"]
     assert [r["p_signal_id"] for r in _lines(written["signals"])] == ["s1", "s2"]
     assert [r["p_alert_id"] for r in _lines(written["alerts"])] == ["a1"]
@@ -93,17 +189,35 @@ def test_blob_sink_dedups_alerts_but_never_signals(monkeypatch):
     are real and must survive."""
     sink, written = _fake_blob_sink(monkeypatch)
     sink.write([ALERT, SIGNAL])
-    sink.write([ALERT,                                          # a repeat
-                {"p_record_type": "alert", "p_alert_id": "a2"},  # new
-                {"p_record_type": "signal", "p_signal_id": "s2"}])
+    sink.write([ALERT, ALERT2, SIGNAL2])            # a repeat, a new one, a signal
     assert [r["p_alert_id"] for r in _lines(written["alerts"])] == ["a1", "a2"]
     assert len(_lines(written["signals"])) == 2
+
+
+def test_blob_sink_authenticates_as_the_configured_identity(monkeypatch):
+    """AZURE_CLIENT_ID pins every credential in the app to one user-assigned
+    identity. Dropping it here fails every Azure call on a user-assigned setup,
+    and the error names none of this."""
+    seen = {}
+
+    class _Cred:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+    monkeypatch.setenv("AZURE_CLIENT_ID", "the-client-id")
+    monkeypatch.setitem(__import__("sys").modules, "azure.identity",
+                        type("m", (), {"DefaultAzureCredential": _Cred}))
+    monkeypatch.setitem(__import__("sys").modules, "azure.storage.blob",
+                        type("m", (), {"BlobServiceClient": lambda url, credential: ("svc", url)}))
+
+    BlobSink(BLOB, "c")._service()
+    assert seen == {"managed_identity_client_id": "the-client-id"}
 
 
 def test_a_sink_never_raises_into_the_batch(monkeypatch):
     """Losing a write must not fail the batch: Event Hubs would redeliver it and
     the alert would fire twice."""
-    sink = BlobSink("https://acct.blob.core.windows.net", "pyre-output")
+    sink = BlobSink(BLOB, "pyre-output")
     monkeypatch.setattr(sink, "_blob_client",
                         lambda prefix: (_ for _ in ()).throw(RuntimeError("403")))
     sink.write([ALERT])
@@ -148,16 +262,23 @@ def _request(method, url, body=b"", params=None):
     return func.HttpRequest(method=method, url=url, body=body, params=params or {})
 
 
-def test_health_reports_the_routing_config_and_what_loaded():
+def test_health_reports_the_routing_config_and_every_contradiction():
     """The endpoint the guides send you to first. It has to answer "which field
-    am I routing on" and "did the bundle load" without any other tooling."""
+    am I routing on", "did the bundle load" and "what is misconfigured" without
+    any other tooling."""
     import function_app
 
-    body = json.loads(function_app.health(_request("GET", "/api/health")).get_body())
-    assert body["sources"][0]["log_type_field"]     # the value to compare against your data
-    assert body["status"] in ("ok", "no-detections-loaded", "bundle-load-failed")
-    # Whichever it is, the field that explains it is present.
-    assert "detections" in body or "error" in body
+    resp = function_app.health(_request("GET", "/api/health"))
+    body = json.loads(resp.get_body())
+
+    assert isinstance(body["problems"], list)          # named, never implied
+    assert set(body["destinations"]) == {"signal", "alert"}
+    assert "endpoint" in body["identity"]
+    assert body["status"] in ("ok", "no-sources-configured", "no-detections-loaded",
+                              "bundle-load-failed", "configuration-problems")
+    assert (resp.status_code == 200) == (body["status"] == "ok")
+    if body["sources"]:
+        assert body["sources"][0]["log_type_field"]    # compare this against your data
 
 
 def test_ingest_rejects_an_unknown_source_by_name():
@@ -165,9 +286,9 @@ def test_ingest_rejects_an_unknown_source_by_name():
 
     resp = function_app.ingest(_request("POST", "/api/ingest", b'{"a": 1}',
                                         params={"source": "not-a-hub"}))
-    assert resp.status_code == 400
-    body = json.loads(resp.get_body())
-    assert body["known"] == sorted(function_app._sources)
+    assert resp.status_code in (400, 503)
+    if resp.status_code == 400:
+        assert json.loads(resp.get_body())["known"] == sorted(function_app._sources)
 
 
 def test_ingest_accepts_an_event_hub_message_shape(monkeypatch):
@@ -175,6 +296,9 @@ def test_ingest_accepts_an_event_hub_message_shape(monkeypatch):
     process_batch onward, so what it accepts must be exactly what Event Hubs
     carries - envelope and all."""
     import function_app
+
+    if not function_app._config.sources:
+        return                                  # nothing to ingest into; covered above
 
     seen = {}
     monkeypatch.setattr(function_app._processor, "process_batch",

@@ -7,9 +7,21 @@
 - [`/health` says bundle-load-failed](#health-says-bundle-load-failed)
 - [Detections load but nothing ever alerts](#detections-load-but-nothing-ever-alerts)
 - [Signals appear but alerts don't](#signals-appear-but-alerts-dont)
-- [Nothing appears in pyre-output](#nothing-appears-in-pyre-output)
+- [Nothing appears at the destination](#nothing-appears-at-the-destination)
 - [A published detection didn't go live](#a-published-detection-didnt-go-live)
 - [`/health` or `/ingest` returns 401 or 403](#health-or-ingest-returns-401-or-403)
+
+---
+
+## Start here
+
+**`GET /api/health?code=<function key>` and read `problems`.** It lists every way
+this instance's settings contradict each other, in words — a destination selected
+with nowhere to send it, a bundle source with no account URL, `redis` with no
+host, no log sources at all. Most of the pages below exist for things `problems`
+cannot see; if it is non-empty, fix that first.
+
+The same list is logged once at startup, prefixed `configuration:`.
 
 ---
 
@@ -64,7 +76,8 @@ no restart needed.
 [azure-pipelines.yml](../azure-pipelines.yml). The build and the upload both
 happen inside Azure, so nothing has to reach SCM from your machine or your
 office network. Given you're moving this repo into an internal ADO repo anyway,
-that's the destination — see [prod.md § Deploying](prod.md#5-deploying).
+that's the destination — see
+[deploying § Deploying from a pipeline](deploying.md#deploying-from-a-pipeline).
 
 > **Deployment Center setup:** Function App → **Deployment Center** → Source:
 > **Azure Repos** → pick org/project/repo/branch `main` → Build provider: Azure
@@ -84,6 +97,7 @@ registered. Azure reports this only in the log stream.
 | In the log | Meaning |
 |---|---|
 | `ModuleNotFoundError: No module named 'yaml'` | The remote build didn't run. Redeploy with `SCM_DO_BUILD_DURING_DEPLOYMENT=true` and `ENABLE_ORYX_BUILD=true` in app settings — or from VS Code, which sets them. |
+| Only `health` and `ingest` registered, plus `configuration: no log sources` | `config/sources.yaml` didn't ship. It is gitignored, so a pipeline building from a clean clone doesn't have one — see [deploying § Log sources in a pipeline](deploying.md#log-sources-in-a-pipeline). `/health` returns 503 with `status: no-sources-configured`. |
 | `ValueError: config/sources.yaml: namespace ... has unknown key(s)` / `source ... has unknown key(s)` | A typo in `sources.yaml`. The message names the key. |
 | `ValueError: ... every namespace needs a namespace:` / `every source needs a hub:` | A `sources.yaml` block missing `namespace:` or `hub:`. |
 | `ValueError: ... would both become the Azure function ...` | Two sources resolve to the same `detect_<namespace>_<hub>` name — usually the same hub added twice, or two functions on one hub with no distinct `consumer_group:`. |
@@ -160,7 +174,7 @@ connection string), the documented minimum for the Event Hub trigger's
 checkpoints is **Storage Blob Data Owner** — the same role that connection
 needs in its own right — plus **Storage Queue Data Contributor** and **Storage
 Table Data Contributor** to match `__queueServiceUri` / `__tableServiceUri`.
-See [poc.md § If your host storage is identity-based too](poc.md#if-your-host-storage-is-identity-based-too).
+See [deploying § If your host storage is identity-based](deploying.md#if-your-host-storage-is-identity-based).
 
 ### 3. The namespace's own metrics
 
@@ -203,7 +217,7 @@ Compare it character by character with the hub in the portal.
 **3. Is the connection setting right?** Every hub's `connection` is derived from
 its `namespace:` label in `sources.yaml` — `namespace: network` needs
 `EVENTHUB_NETWORK`, not a hand-typed name. `/health` shows an empty
-`eventhub_settings` list when every namespace resolves; a non-empty one names
+`problems` list when every namespace resolves; a non-empty one names
 exactly which namespace's setting is missing or mismatched. The setting itself
 exists as an app setting in one of two shapes:
 
@@ -266,9 +280,9 @@ The `error` field names the exception.
 
 | Error | Cause |
 |---|---|
-| `ResourceNotFoundError` / `BlobNotFound` | `current.json` isn't at the **root** of the `detections` container, or the container name doesn't match `DAC_CONTAINER`. |
+| `ResourceNotFoundError` / `BlobNotFound` | `current.json` isn't at the **root** of the `detections` container, or the container name doesn't match `DETECTIONS_CONTAINER`. |
 | `ClientAuthenticationError` / `AuthorizationPermissionMismatch` | The app's identity lacks **Storage Blob Data Contributor** on the storage account. Assign it and wait 5 minutes. |
-| `ServiceRequestError` / DNS failure | `DAC_BLOB_ACCOUNT_URL` is malformed. It is exactly `https://<account>.blob.core.windows.net` — no trailing slash, no container, no `?` parameters. |
+| `ServiceRequestError` / DNS failure | `DETECTIONS_BLOB_ACCOUNT_URL` is malformed. It is exactly `https://<account>.blob.core.windows.net` — no trailing slash, no container, no `?` parameters. |
 | `KeyError: 'version'` | `current.json` isn't the expected JSON. It must be `{"version": "...", "path": "bundles/....zip"}`. |
 | `BadZipFile` | The zip didn't upload completely, or `path` points at something that isn't the bundle. |
 
@@ -293,7 +307,7 @@ They must be **exactly** equal. `RuntimeAuditLogs` ≠ `runtimeauditlogs`.
 Then send a batch and read **Log stream**:
 
 ```
-4 event(s) from hub 'logs-in' had no value in the log-type field 'category'
+platform/logs-in: 4 event(s) had no value in the log-type field 'category'
 - check log_type_field in config/sources.yaml against your data
 ```
 
@@ -301,7 +315,8 @@ Then send a batch and read **Log stream**:
 (`category` vs `Category`). Fix it in `sources.yaml` and redeploy.
 
 ```
-no detections are registered for these log-type values: OperationalLogs (3 event(s)).
+platform/logs-in: no detections are registered for these log-type values:
+OperationalLogs (3 event(s)).
 ```
 
 → Routing worked; no detection covers that value. Either add one, or accept the
@@ -339,27 +354,56 @@ setting.
 
 To confirm dedup is what's holding it: restart the Function App (which clears
 in-process state) and re-send. If an alert appears, the earlier one was already
-open.
+open. **That only works with `STATE_BACKEND=memory`** — Redis state survives a
+restart, by design.
+
+The signals themselves say which it was: `p_alert_id` is null on a match held
+back by a threshold, and carries the open alert's id on a match that joined one.
+See [signals-and-alerts.md](signals-and-alerts.md#how-they-link).
+
+**One more cause:** the alert storm limit. `ALERT_STORM_LIMIT_PER_HOUR` (default
+1000 per detection per hour) drops alerts and keeps signals, and says so at ERROR:
+
+```
+platform/logs-in: alert storm limit (1000/hour) reached; alert(s) dropped,
+signals retained: My.Rule (12x)
+```
 
 ---
 
-## Nothing appears in pyre-output
+## Nothing appears at the destination
+
+**First, read the batch line** (Monitoring → Log stream). It tells you which half
+this is:
+
+```
+batch platform/logs-in msgs=3 events=7 new=7 signals=4 alerts=1 12ms
+```
+
+`signals=0` is a **routing** problem — see
+[detections load but nothing ever alerts](#detections-load-but-nothing-ever-alerts).
+`signals` above zero with nothing at the destination is a **destination**
+problem, and it is one of these:
 
 | Check | |
 |---|---|
-| Is anything matching at all? | If `signals/` is empty too, this is a routing problem — see above. |
-| `OUTPUT_BLOB_ACCOUNT_URL` set? | `/health` → `output` shows what the engine resolved. `null` means neither output setting is set and records are being **dropped**. |
-| Is `OUTPUT_HTTP_URL` set? | It wins over the blob. Unset it if you want blob output. |
-| Blob role assigned? | **Storage Blob Data Contributor**. Without it, App Insights shows `append-blob write failed`. |
-| Right container? | Default `pyre-output`; `OUTPUT_BLOB_CONTAINER` overrides. The engine creates it if it can. |
+| `/health` → `problems` | A destination selected with nowhere to send it is named here: `SIGNAL_DESTINATION=blob but SIGNAL_BLOB_ACCOUNT_URL is not set; signals will be dropped`. |
+| `/health` → `destinations` | What each stream actually resolved to. `null` means that stream's `*_DESTINATION` is `none` and its records are **discarded**. |
+| Blob: role assigned? | **Storage Blob Data Contributor** on that account. Without it, App Insights shows `append-blob write failed`. |
+| Blob: right container? | Default `pyre-output`; `SIGNAL_BLOB_CONTAINER` / `ALERT_BLOB_CONTAINER` override. The engine creates it if it can. Records are under `signals/` and `alerts/` **inside** it. |
+| HTTP: is the far end returning an error? | The status code is checked and logged — look for `returned 401` / `returned 500`. |
+| HTTP: auth header | `*_HTTP_AUTH_HEADER` is sent whole as `Authorization`. A Key Vault reference that failed to resolve arrives as the literal `@Microsoft.KeyVault(...)` string — check the app's **Key Vault Secrets User** role. |
 
 Write failures are logged and swallowed on purpose — a failed write must not fail
-the batch, or Event Hubs redelivers it and the alert fires twice. So **check
-Application Insights**, not just the container:
+the batch, or Event Hubs redelivers it and the alert fires twice. So a dropped
+record appears **only** in Application Insights, never at the destination:
 
 ```kusto
-traces | where message contains "write failed" or message contains "POST failed"
+traces | where message contains "record(s) dropped"
 ```
+
+That query is worth an alert rule. See
+[operations § What to alert on](operations.md#what-to-alert-on).
 
 ---
 
@@ -370,11 +414,11 @@ traces | where message contains "write failed" or message contains "POST failed"
    changes automatically — unless you passed `--version` and reused a value.
 2. **Did both files upload?** The zip **and** `current.json`, with `path`
    matching where the zip actually is, `bundles/` included.
-3. **Has the refresh interval elapsed?** Up to `DAC_REFRESH_SECONDS` (default 60)
+3. **Has the refresh interval elapsed?** Up to `DETECTIONS_REFRESH_SECONDS` (default 60)
    on a warm worker.
 4. **Check `/health` → `bundle_version`.** If it still shows the old value after
    a couple of minutes, the pointer read isn't seeing your upload — confirm the
-   container and account in `DAC_BLOB_ACCOUNT_URL` / `DAC_CONTAINER`.
+   container and account in `DETECTIONS_BLOB_ACCOUNT_URL` / `DETECTIONS_CONTAINER`.
 5. **A reload can fail silently by design.** If the new bundle can't be read, the
    worker keeps serving the last good one rather than stopping detection. App
    Insights: `bundle refresh failed`.

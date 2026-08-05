@@ -178,7 +178,7 @@ def _upload(account_url, container, zip_path, arc_path, pointer_name, pointer_js
     svc.get_blob_client(container, pointer_name).upload_blob(
         pointer_json.encode("utf-8"), overwrite=True)
     print(f"uploaded {container}/{pointer_name}  ->  {pointer_json}")
-    print("\nPublished. Warm workers pick this up within DAC_REFRESH_SECONDS; "
+    print("\nPublished. Warm workers pick this up within DETECTIONS_REFRESH_SECONDS; "
           "check /health for the new bundle_version.")
 
 

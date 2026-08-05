@@ -1,13 +1,31 @@
-# never commit
+# Never commit: real configuration and anything derived from it.
 .env
+.env.*
 local.settings.json
 
-# python
+# Your instance's log sources. config/sources.example.yaml is the template that
+# stays in the repo; copy it to config/sources.yaml and edit. Drop this line on
+# an internal branch if you want the real file version-controlled.
+config/sources.yaml
+
+# Local tooling state
+.claude/
+.vscode/*.local.json
+
+# Python
 __pycache__/
 *.pyc
 .venv/
+venv/
 .pytest_cache/
 
-# build output (dac/publish.py writes here; the bundle lives in Blob)
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
+# Build output (dac/publish.py writes here; the bundle lives in Blob)
 dist/
 .bundle/

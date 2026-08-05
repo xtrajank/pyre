@@ -15,7 +15,7 @@ whatever your network already requires for the other namespaces pyre reads).
 ### 1. Grant read access — no connection string, ever
 
 Function App → **Settings → Identity** confirms a managed identity is already
-on (it has to be, for the DAC blob and output). Reuse it:
+on (it has to be, for the detection bundle and the output destinations). Reuse it:
 
 Event Hubs **Namespace** → **Access Control (IAM)** → **+ Add → Add role
 assignment** → role **Azure Event Hubs Data Receiver** → **Managed identity** →
@@ -26,7 +26,7 @@ minutes to apply.
 
 The trigger also writes its checkpoints to the app's own storage account, so it
 depends on **Storage Blob Data Contributor** there too — already granted in
-[poc.md step 2](poc.md#step-2--give-the-function-app-access-to-that-storage),
+[deploying step 2](deploying.md#2-identity-and-roles),
 and nothing to repeat per namespace.
 
 > **User-assigned identity?** Check which kind you have — the Identity blade has
@@ -36,15 +36,15 @@ and nothing to repeat per namespace.
 > select *the identity*, not the Function App. Selecting the Function App there
 > assigns the role to a system-assigned identity that doesn't exist, and the
 > assignment silently covers nothing. Step 2 then needs one extra setting, and
-> [poc.md](poc.md) step 2's storage role needs the same treatment.
+> [deploying](deploying.md#2-identity-and-roles) step 2's storage role needs the same treatment.
 
 ### 2. Pick a namespace label and add the app settings
 
 The label is yours — short, and it only has to be unique within
 `sources.yaml`. It becomes both the app-setting name and part of every
 function name it covers, e.g. `network` → `EVENTHUB_NETWORK`. Anything that
-isn't a letter or digit becomes `_` on the way (`pyre-evnthub` →
-`EVENTHUB_PYRE_EVNTHUB`), since neither an app-setting name nor an Azure
+isn't a letter or digit becomes `_` on the way (`app-logs` →
+`EVENTHUB_APP_LOGS`), since neither an app-setting name nor an Azure
 function name can hold a hyphen.
 
 **That rewriting applies to the setting's name, never to its value.** The
@@ -97,15 +97,14 @@ assuming the defaults fit.
 python -m pytest tests -q      # catches a typo'd/duplicate namespace or hub before it ships
 ```
 
-Deploy (VS Code, or your pipeline — see [prod.md § Deploying](prod.md#5-deploying)).
+Deploy (VS Code, or your pipeline — see [deploying § Deploying from a pipeline](deploying.md#deploying-from-a-pipeline)).
 Then `GET /health`:
 
 - The new source appears under `sources`, with the `function` name it
   registered as, the `connection` app setting its trigger will look for, and the
   `consumer_group` it will claim. Compare all three against what you created.
-- `eventhub_settings` is `[]`. Anything else names exactly which namespace's
-  app setting is missing or mismatched — fix that before chasing anything
-  else.
+- `problems` is `[]`. A missing or mismatched namespace app setting is named
+  there in words — fix that before chasing anything else.
 
 **Then confirm the listener attached**, which `/health` cannot tell you — it
 reports configuration, not connections. Restart the app and check Storage

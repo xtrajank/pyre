@@ -1,0 +1,12 @@
+# Test-only dependencies. Never deployed - .funcignore excludes this file, and
+# nothing under pyre_engine/ imports any of it.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   python -m pytest tests -q
+
+-r requirements.txt
+
+pytest~=9.1
+# Proves the Redis and in-process state backends behave identically without a
+# real Redis. Tests that need it use pytest.importorskip, so it stays optional.
+fakeredis~=2.36

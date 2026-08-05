@@ -1,10 +1,14 @@
 # Installed on the Linux worker at deploy time. Keep this short - every entry is
 # build time on every deploy.
-azure-functions
-azure-identity
-azure-storage-blob
-pyyaml
-requests
+#
+# Pinned to a compatible minor range so a deploy months from now builds what was
+# tested, and a patch-level security fix still lands without an edit here.
 
-# Only imported when REDIS_HOST is set (production shared state).
-redis>=5.0
+azure-functions~=1.24
+azure-identity~=1.25
+azure-storage-blob~=12.30
+pyyaml~=6.0
+requests~=2.32
+
+# Only imported when STATE_BACKEND=redis (shared state across workers).
+redis~=8.0

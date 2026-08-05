@@ -8,9 +8,9 @@ The contract is two methods:
     current_version() -> str        cheap "did anything change?" probe
     ensure_local(version) -> str    a directory the Registry can walk
 
-Two implementations, chosen by whether DAC_BLOB_ACCOUNT_URL is set:
-    BlobBundleSource   Azure Blob via Managed Identity. Every deployed env.
-    LocalBundleSource  a directory on disk. Tests and local runs.
+Two implementations, chosen by DETECTIONS_SOURCE:
+    blob   BlobBundleSource   Azure Blob via Managed Identity. Deployed apps.
+    local  LocalBundleSource  a directory on disk. Tests and local runs.
 """
 import hashlib
 import io
@@ -85,11 +85,12 @@ class BlobBundleSource:
 
 def source_from_config(cfg):
     """The one swap point between "detections from Blob" and "detections from a
-    folder". Setting DAC_BLOB_ACCOUNT_URL is what picks Blob - there is no
-    separate mode setting to contradict it."""
-    if cfg.dac_blob_account_url:
-        return BlobBundleSource(cfg.dac_blob_account_url, cfg.dac_container, cfg.dac_pointer)
-    return LocalBundleSource(cfg.dac_local_dir)
+    folder". DETECTIONS_SOURCE names which; a third kind is one more class and
+    one more branch here."""
+    if cfg.detections_source == "blob":
+        return BlobBundleSource(cfg.detections_blob_account_url, cfg.detections_container,
+                                cfg.detections_pointer)
+    return LocalBundleSource(cfg.detections_local_dir)
 
 
 def _hash_tree(path: str) -> str:

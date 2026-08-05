@@ -1,0 +1,27 @@
+# The steps that build and upload one bundle. Shared by the gated and ungated
+# forms in azure-pipelines-publish.yml so they cannot drift.
+
+parameters:
+  - name: azureSubscription
+    type: string
+  - name: accountUrl
+    type: string
+
+steps:
+  - task: UsePythonVersion@0
+    inputs: { versionSpec: "3.11" }
+  - script: pip install pyyaml azure-identity azure-storage-blob
+    displayName: install
+  - task: AzureCLI@2
+    displayName: publish to ${{ parameters.accountUrl }}
+    inputs:
+      azureSubscription: ${{ parameters.azureSubscription }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      # addSpnToEnvironment exports AZURE_CLIENT_ID / AZURE_TENANT_ID /
+      # servicePrincipalKey, which DefaultAzureCredential inside publish.py then
+      # picks up. No secret is written to a file.
+      addSpnToEnvironment: true
+      inlineScript: |
+        export AZURE_CLIENT_SECRET="$servicePrincipalKey"
+        python publish.py --upload ${{ parameters.accountUrl }}

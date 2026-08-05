@@ -1,0 +1,44 @@
+# Publish the detection bundle to one pyre instance's storage account.
+# Instantiated once per instance from azure-pipelines.yml.
+
+parameters:
+  - name: instance
+    type: string
+  # ARM service connection for THIS instance. Each instance gets its own: a
+  # shared connection means one stage can publish over another's bundle.
+  - name: azureSubscription
+    type: string
+  # https://<account>.blob.core.windows.net - no container, no trailing slash.
+  - name: accountUrl
+    type: string
+  - name: environment
+    type: string
+    default: ""
+  - name: dependsOn
+    type: object
+    default: []
+
+stages:
+  - stage: publish_${{ parameters.instance }}
+    displayName: publish ${{ parameters.instance }}
+    dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - ${{ if parameters.environment }}:
+          - deployment: publish
+            environment: ${{ parameters.environment }}
+            strategy:
+              runOnce:
+                deploy:
+                  steps:
+                    - checkout: self
+                    - template: azure-pipelines-publish-steps.yml
+                      parameters:
+                        azureSubscription: ${{ parameters.azureSubscription }}
+                        accountUrl: ${{ parameters.accountUrl }}
+      - ${{ else }}:
+          - job: publish
+            steps:
+              - template: azure-pipelines-publish-steps.yml
+                parameters:
+                  azureSubscription: ${{ parameters.azureSubscription }}
+                  accountUrl: ${{ parameters.accountUrl }}
