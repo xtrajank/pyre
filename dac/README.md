@@ -112,7 +112,7 @@ def indicators(event):
 Values are normalized to a sorted list of strings and empties are dropped. Pick
 key names your destination can index — there is no fixed vocabulary.
 
-### The four things that silently break a bundle
+### The five things that silently break a bundle
 
 `publish.py` refuses to publish if it can catch them, but know them anyway:
 
@@ -122,9 +122,24 @@ key names your destination can index — there is no fixed vocabulary.
 | `LogTypes:` doesn't match your data exactly | Case-sensitive. `RuntimeAuditLogs` ≠ `runtimeauditlogs`. Check `log_type_field` in the engine's `config/sources.yaml` and the actual value on your records |
 | A missing `RuleID`, `Filename` or `LogTypes` | The engine skips the file without an error |
 | A shared helper with no `AnalysisType: global` YAML | Its folder never reaches the import path, so `from x import y` fails and every detection using it is skipped |
+| A detection imports a third-party package the Function App doesn't have | The engine would skip it too, but only as a runtime warning discovered whenever someone happens to read the logs. `publish.py` blocks this one before it ships: add the package to the Function App's `requirements.txt`, get it deployed, then republish. |
 
 The folder layout is otherwise entirely up to you — the engine walks the whole
 tree.
+
+### The import-safety check needs the Function App's `requirements.txt`
+
+`publish.py` treats a detection's import as safe if it's in the Python
+standard library, a global helper in this bundle, or something
+`requirements.txt` **one directory above `dac/`** actually installs in the
+environment running `publish.py` (name mismatches like `pyyaml` → `yaml` or
+`azure-storage-blob` → `azure` are resolved automatically via
+`importlib.metadata`, no table to maintain by hand). If that file isn't
+there, or isn't installed, the check just prints a notice and skips — which
+is expected once this folder is split into its own repo per the top of this
+README, since there's no Function App checked out next to it. Run it inside
+the pyre repo (or `pip install -r ../requirements.txt` before publishing) to
+get the real guarantee.
 
 ## Testing a detection before you publish
 

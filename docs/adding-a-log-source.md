@@ -91,6 +91,13 @@ settings' own shape (`category` / `time` / `records`) — check yours in Event
 Hubs Namespace → your hub → **Data Explorer → View events → Body** before
 assuming the defaults fit.
 
+Set `log_type_field: ""` for a source with no field like that at all —
+Azure-native diagnostic logs (Function App logs, Storage Account logs) carry
+no Cribl-style dataset field, and a table often holds several categories you
+would rather keep grouped as one detection surface anyway. Every record from
+that source then routes on its `hub` name instead; write `LogTypes:` in your
+detections to match the hub, not a field value.
+
 ### 4. Deploy, then verify
 
 ```powershell

@@ -29,7 +29,14 @@ stages:
         steps:
           - task: UsePythonVersion@0
             inputs: { versionSpec: "3.11" }
-          - script: pip install pyyaml pytest
+          # The Function App's requirements.txt, one level up, is what makes
+          # publish.py's import-safety check real: it fails a detection whose
+          # import isn't something the deployed app actually has installed.
+          # Optional here too - a dac/ repo split out on its own (see
+          # README.md) has no such file next door, and the check just skips.
+          - script: |
+              pip install pyyaml pytest
+              if [ -f ../requirements.txt ]; then pip install -r ../requirements.txt; fi
             displayName: install
           # Build without --upload: this validates every detection and fails the
           # push if a bundle would load nothing. Cheap, and it runs before any

@@ -320,7 +320,8 @@ OperationalLogs (3 event(s)).
 ```
 
 → Routing worked; no detection covers that value. Either add one, or accept the
-gap. This line is your coverage report — worth an Application Insights alert.
+gap. This line is your coverage report — logged at INFO, worth a weekly digest
+rather than a page (see [operations.md](operations.md#what-to-alert-on)).
 
 **Third possibility: the envelope.** If records are wrapped in `{"records": [...]}`
 and `envelope_field` is empty, the engine evaluates the *envelope* as one event —

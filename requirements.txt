@@ -12,3 +12,6 @@ requests~=2.32
 
 # Only imported when STATE_BACKEND=redis (shared state across workers).
 redis~=8.0
+
+# For detections
+py-dateutil==2.2

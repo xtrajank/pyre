@@ -56,7 +56,7 @@ clean, which is the normal case.
 | WARNING | `N message(s) were not valid JSON` | A producer is sending something that isn't JSON. |
 | INFO | `N event(s) already processed (Event Hubs redelivery)` | Normal in small numbers — at-least-once delivery working as designed. Sustained means checkpointing is failing. |
 | WARNING | `N event(s) had no value in the log-type field 'category'` | **The most common misconfiguration.** `log_type_field` names a field your records don't have — usually casing. Fix `config/sources.yaml`. |
-| WARNING | `no detections are registered for these log-type values: X (N event(s))` | Routing worked; nothing covers that value. **This is your coverage report.** |
+| INFO | `no detections are registered for these log-type values: X (N event(s))` | Routing worked; nothing covers that value yet. **This is your coverage report**, not a problem to page on. |
 | WARNING | `detection(s) raised and were skipped: My.Rule (5x)` | A broken detection. One traceback per detection per batch, then the count — never five tracebacks for five events. |
 | ERROR | `alert storm limit (1000/hour) reached` | A detection is firing far more than expected. Alerts dropped, **signals retained**. |
 | ERROR | `... (N record(s) dropped)` | A destination write failed. See below. |

@@ -5,7 +5,7 @@ publishes a versioned bundle to Blob storage; running workers pick it up within
 `DETECTIONS_REFRESH_SECONDS` with no redeploy of anything.
 
 > **[dac/README.md](../dac/README.md) is the full guide** — the YAML keys, every
-> optional function, publishing, testing, and the four things that silently break
+> optional function, publishing, testing, and the five things that silently break
 > a bundle. [`dac/`](../dac/) is a working starter you copy into its own repo.
 
 This page covers how the engine consumes what that repo produces.
@@ -41,7 +41,7 @@ is not `runtimeauditlogs`. This is the routing table:
 
 | Where | What |
 |---|---|
-| `config/sources.yaml` → `log_type_field:` | which field on the record holds the value |
+| `config/sources.yaml` → `log_type_field:` | which field on the record holds the value — `""` means there is no such field, and the source's `hub:` name is used instead |
 | the detection's `LogTypes:` | which values it covers |
 | `/health` → `log_types` | every value that actually loaded |
 

@@ -83,6 +83,9 @@ class Source:
     consumer_group: str = "$Default"
     # THE routing field: its value on each record must equal a detection's
     # `LogTypes:` entry exactly (case-sensitive) or nothing will ever fire.
+    # "" means this source has no such field (true of Azure-native diagnostic
+    # logs, which carry no Cribl-style dataset field) - every record from it
+    # routes on `hub` instead.
     log_type_field: str = "category"
     event_time_field: str = "time"
     # Field holding an array of records when one message carries many. Set to ""

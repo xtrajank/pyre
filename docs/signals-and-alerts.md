@@ -52,17 +52,12 @@ never collide with the engine's.
 `p_any_*` fields are pivot values a detection declared through `indicators()` —
 see [below](#p_any_-pivot-fields).
 
-`p_schema_version` is on every record. It is `"1.0"` today; a change to any field
-below bumps it, so a receiver that sees an unfamiliar version knows to come back
-here rather than guess at a missing field.
-
 ---
 
 ## Signal
 
 ```json
 {
-  "p_schema_version": "1.0",
   "p_record_type": "signal",
   "p_signal_id": "2c319cfb-3baf-4000-b2e3-dabf742ccfb6",
   "p_alert_id": null,
@@ -112,7 +107,6 @@ without joining back to the signals stream.
 
 ```json
 {
-  "p_schema_version": "1.0",
   "p_record_type": "alert",
   "p_alert_id": "c0716ab0-ab01-4474-aa5a-8ab6af1bfcd6",
 

@@ -10,7 +10,7 @@ their job, not events going missing.
 
 This module is the ONLY place either schema is written down, so a field cannot
 exist in one half of the code and not the other. docs/signals-and-alerts.md
-documents what is built here; changing a field is a `P_SCHEMA_VERSION` bump.
+documents what is built here.
 
 Every engine-added field is `p_`-prefixed. The raw log record lives under
 `p_event` untouched, so an event carrying its own `severity` or `title` can
@@ -38,11 +38,6 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("pyre.records")
 
-# Bump on any change to the fields below. Consumers pin on it; a receiver that
-# sees an unfamiliar version knows to check docs/signals-and-alerts.md rather
-# than guess at a missing field.
-P_SCHEMA_VERSION = "1.0"
-
 SIGNAL = "signal"
 ALERT = "alert"
 
@@ -59,7 +54,6 @@ def build_signal(det, source, event, log_type: str, dedup_string: str,
     """One match. `det` is a Detection, `source` a Source - both duck-typed, so
     this module stays independent of how either is loaded."""
     return {
-        "p_schema_version": P_SCHEMA_VERSION,
         "p_record_type": SIGNAL,
         "p_signal_id": str(uuid.uuid4()),
         # Filled in later if this match reaches an alert - see the module
@@ -96,7 +90,6 @@ def build_alert(det, source, event, log_type: str, dedup_string: str, indicators
     the live total.
     """
     return {
-        "p_schema_version": P_SCHEMA_VERSION,
         "p_record_type": ALERT,
         "p_alert_id": str(uuid.uuid4()),
 

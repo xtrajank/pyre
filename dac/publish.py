@@ -29,10 +29,13 @@ Useful flags:
     --version v1.2.3            pin the version instead of hashing contents
 """
 import argparse
+import ast
 import fnmatch
 import hashlib
+import importlib.metadata
 import json
 import os
+import re
 import sys
 import zipfile
 
@@ -88,7 +91,10 @@ def _validate(files):
         return None
 
     by_arc = {arc for _full, arc in files}
+    full_by_arc = {arc: full for full, arc in files}
     rules, helpers, log_types, errors, ignored = 0, 0, {}, [], 0
+    py_files: list[tuple[str, str]] = []       # detections' and helpers' .py, for the import check
+    helper_modules: set[str] = set()
 
     for full, arc in files:
         if not arc.endswith((".yml", ".yaml")):
@@ -107,11 +113,11 @@ def _validate(files):
         # bundler never disagrees with what will actually load. A repo is full of
         # YAML that isn't a detection (CI config, schemas); it rides along in the
         # zip harmlessly and must not be reported as broken.
-        if atype not in ("rule", "global") and "RuleID" not in meta:
+        if atype not in ("rule", "scheduled_rule", "global") and "RuleID" not in meta:
             ignored += 1
             continue
-        if atype not in (None, "rule", "global"):
-            ignored += 1                        # policy / scheduled_rule / datamodel
+        if atype not in (None, "rule", "scheduled_rule", "global"):
+            ignored += 1                        # policy / datamodel
             continue
         atype = atype or "rule"
 
@@ -127,6 +133,9 @@ def _validate(files):
         if atype == "global":
             if not fname:
                 errors.append(f"{arc}: AnalysisType global needs Filename")
+            elif expect in full_by_arc:
+                helper_modules.add(os.path.splitext(os.path.basename(fname))[0])
+                py_files.append((full_by_arc[expect], expect))
             helpers += 1
             continue
 
@@ -136,8 +145,91 @@ def _validate(files):
                 errors.append(f"{arc}: missing required key '{key}'")
         for lt in meta.get("LogTypes") or []:
             log_types[lt] = log_types.get(lt, 0) + 1
+        if fname and expect in full_by_arc:
+            py_files.append((full_by_arc[expect], expect))
 
+    errors += _check_imports(py_files, helper_modules)
     return rules, helpers, log_types, errors, ignored
+
+
+def _requirement_names(path: str) -> list[str]:
+    """Package names declared in a requirements.txt, version specifiers and
+    comments stripped. Good enough to answer "is this installed?" - it does
+    not need to be a full parser."""
+    names = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if not line or line.startswith("-"):
+                continue
+            name = re.split(r"[<>=!~\[; ]", line, maxsplit=1)[0].strip()
+            if name:
+                names.append(name)
+    return names
+
+
+def _is_installed(dist_name: str) -> bool:
+    try:
+        importlib.metadata.version(dist_name)
+        return True
+    except importlib.metadata.PackageNotFoundError:
+        return False
+
+
+def _check_imports(py_files, helper_modules):
+    """Block a publish whose detections import something the deployed
+    Function App doesn't have. Without this, a missing dependency only shows
+    up as a runtime warning on the worker - `pyre_engine.registry` skips the
+    detection and keeps going, so it can stay silently dead for as long as
+    the mismatch exists.
+
+    "Available" is: the stdlib, whatever requirements.txt actually installs
+    in THIS environment (name mismatches like pyyaml/yaml or
+    azure-storage-blob/azure are resolved by `importlib.metadata`, not a
+    hand-maintained table), and this bundle's own global helpers.
+    """
+    req_path = os.path.normpath(os.path.join(HERE, "..", "requirements.txt"))
+    if not os.path.exists(req_path):
+        print(f"publish: no requirements.txt at {req_path} - skipping the "
+              f"import-safety check (expected if dac/ has been split into "
+              f"its own repo, with no Function App checked out next to it)\n")
+        return []
+
+    required = _requirement_names(req_path)
+    if required and not any(_is_installed(n) for n in required):
+        print("publish: requirements.txt is not installed in this environment "
+              "- skipping the import-safety check "
+              "(pip install -r ../requirements.txt to enable it)\n")
+        return []
+
+    allowed = (set(sys.stdlib_module_names)
+              | set(importlib.metadata.packages_distributions())
+              | helper_modules)
+
+    errors = []
+    for full, arc in py_files:
+        with open(full, encoding="utf-8") as fh:
+            source = fh.read()
+        try:
+            tree = ast.parse(source, filename=arc)
+        except SyntaxError as e:
+            errors.append(f"{arc}: unparseable Python ({e})")
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [n.name for n in node.names]
+            elif isinstance(node, ast.ImportFrom) and not node.level:  # level>0: relative, always fine
+                names = [node.module] if node.module else []
+            else:
+                continue
+            for name in names:
+                top = name.split(".")[0]
+                if top not in allowed:
+                    errors.append(
+                        f"{arc}: imports '{top}', which is not in requirements.txt or a "
+                        f"global helper - add it to requirements.txt, deploy the Function "
+                        f"App, then republish")
+    return errors
 
 
 def _version(files):
@@ -178,7 +270,7 @@ def _upload(account_url, container, zip_path, arc_path, pointer_name, pointer_js
     svc.get_blob_client(container, pointer_name).upload_blob(
         pointer_json.encode("utf-8"), overwrite=True)
     print(f"uploaded {container}/{pointer_name}  ->  {pointer_json}")
-    print("\nPublished. Warm workers pick this up within DETECTIONS_REFRESH_SECONDS; "
+    print("\nPublished. Warm workers pick this up within DAC_REFRESH_SECONDS; "
           "check /health for the new bundle_version.")
 
 

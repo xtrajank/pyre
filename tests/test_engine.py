@@ -117,13 +117,13 @@ def test_a_global_helper_is_importable_from_a_detection():
 # it, fails here.
 
 SIGNAL_FIELDS = {
-    "p_schema_version", "p_record_type", "p_signal_id", "p_alert_id",
+    "p_record_type", "p_signal_id", "p_alert_id",
     "p_detection_id", "p_detection_name", "p_severity", "p_tags", "p_reports",
     "p_log_type", "p_source_namespace", "p_source_hub",
     "p_dedup", "p_event_time", "p_processed_time", "p_event",
 }
 ALERT_FIELDS = {
-    "p_schema_version", "p_record_type", "p_alert_id",
+    "p_record_type", "p_alert_id",
     "p_detection_id", "p_detection_name", "p_severity", "p_title", "p_description",
     "p_runbook", "p_reference", "p_tags", "p_reports",
     "p_log_type", "p_source_namespace", "p_source_hub",
@@ -281,6 +281,22 @@ def test_two_sources_with_different_shapes_share_one_processor():
     assert sink.signals[0]["p_source_hub"] == "normalized-in"
 
 
+def test_a_blank_log_type_field_routes_by_hub_name(tmp_path):
+    """Azure-native diagnostic logs carry no dataset-like field at all.
+    `log_type_field: ""` is how such a source still routes: every record uses
+    the source's own hub name as its log type."""
+    (tmp_path / "m.py").write_text("def rule(e): return True\n")
+    (tmp_path / "m.yml").write_text(
+        "AnalysisType: rule\nRuleID: by-hub\nFilename: m.py\nLogTypes: [h]\n")
+
+    proc, sink = build(bundle=str(tmp_path))
+    src = Source(hub="h", log_type_field="", envelope_field="")
+    proc.process_batch([json.dumps({"x": 1})], src)
+
+    assert len(sink.signals) == 1
+    assert sink.signals[0]["p_log_type"] == "h"
+
+
 def test_unwrap_handles_the_three_message_shapes():
     assert _unwrap({"a": 1}, "records") == [{"a": 1}]                       # single record
     assert _unwrap([{"a": 1}, {"b": 2}], "records") == [{"a": 1}, {"b": 2}]  # JSON array
@@ -302,9 +318,15 @@ def test_a_wrong_log_type_field_produces_no_signals_and_says_so(caplog):
 
 
 def test_an_unrouted_log_type_is_named_in_the_logs(caplog):
+    """Informational, not a warning: covering fewer log types than a source
+    carries is normal, not itself a problem to page on."""
+    import logging
     proc, _sink = build()
-    proc.process_batch([json.dumps({"Category": "SomeOtherLogs", "x": 1})], AZURE)
+    with caplog.at_level(logging.INFO, logger="pyre.processor"):
+        proc.process_batch([json.dumps({"Category": "SomeOtherLogs", "x": 1})], AZURE)
     assert "SomeOtherLogs" in caplog.text
+    unrouted = [r for r in caplog.records if "SomeOtherLogs" in r.message]
+    assert unrouted and unrouted[0].levelname == "INFO"
 
 
 def test_every_batch_reports_what_it_did(caplog):

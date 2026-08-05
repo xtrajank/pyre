@@ -119,7 +119,7 @@ class Processor:
                 redelivered += 1
                 continue
             event = Event(record)
-            log_type = event.get(source.log_type_field)
+            log_type = event.get(source.log_type_field) if source.log_type_field else source.hub
             if not log_type:
                 no_log_type += 1
                 continue
@@ -227,10 +227,13 @@ class Processor:
                         "log_type_field in config/sources.yaml against your data",
                         source.id, no_log_type, source.log_type_field)
         if unrouted:
-            log.warning("%s: no detections are registered for these log-type values: %s. "
-                        "A detection's YAML LogTypes must contain the value exactly.",
-                        source.id,
-                        ", ".join(f"{lt} ({n} event(s))" for lt, n in sorted(unrouted.items())))
+            # Informational, not a warning: an instance normally ingests more
+            # log-type values than it has detections written for, especially
+            # early on, and that is not itself a problem to flag loudly.
+            log.info("%s: no detections are registered for these log-type values: %s. "
+                     "A detection's YAML LogTypes must contain the value exactly.",
+                     source.id,
+                     ", ".join(f"{lt} ({n} event(s))" for lt, n in sorted(unrouted.items())))
         if det_errors:
             log.warning("%s: detection(s) raised and were skipped for those events: %s",
                         source.id,
