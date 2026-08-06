@@ -226,6 +226,7 @@ class BlobSink:
         self._container = container
         self._svc = None
         self._container_ready = False
+        self._known_blobs: set[str] = set()  # "<prefix>/<day>" confirmed to exist
         self._seen_alerts: OrderedDict[str, None] = OrderedDict()
 
     def describe(self) -> str:
@@ -274,11 +275,21 @@ class BlobSink:
             except Exception:
                 pass                    # already exists, or no permission to create
             self._container_ready = True
-        client = svc.get_blob_client(self._container, f"{prefix}/{day}.jsonl")
-        try:
-            client.create_append_blob()  # first write of the day
-        except Exception:
-            pass                        # already exists - the normal path
+        blob_name = f"{prefix}/{day}.jsonl"
+        client = svc.get_blob_client(self._container, blob_name)
+        if blob_name not in self._known_blobs:
+            # create_append_blob() RESETS an existing blob to 0 bytes - Put Blob
+            # overwrites by default. IfMissing makes it a true create-if-absent
+            # (If-None-Match: *), so a blob another worker already started today
+            # is never touched. Cached per blob name so a long-lived worker
+            # doesn't pay this extra round trip on every batch.
+            from azure.core import MatchConditions
+            from azure.core.exceptions import ResourceExistsError
+            try:
+                client.create_append_blob(match_condition=MatchConditions.IfMissing)
+            except ResourceExistsError:
+                pass                    # already exists - the normal path
+            self._known_blobs.add(blob_name)
         return client
 
     def _append(self, prefix: str, records: list[dict]) -> None:

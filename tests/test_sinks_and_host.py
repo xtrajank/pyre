@@ -194,6 +194,52 @@ def test_blob_sink_dedups_alerts_but_never_signals(monkeypatch):
     assert len(_lines(written["signals"])) == 2
 
 
+def test_blob_sink_never_recreates_an_existing_blob(monkeypatch):
+    """create_append_blob() resets an existing blob to 0 bytes - Put Blob
+    overwrites by default. A blob another worker (or an earlier batch this
+    run) already started must never see that call again, or the day's file
+    gets wiped on every new execution."""
+    from azure.core.exceptions import ResourceExistsError
+
+    created = []
+
+    class _FakeClient:
+        def __init__(self, exists):
+            self.blocks = []
+            self._exists = exists
+
+        def create_append_blob(self, match_condition=None):
+            created.append(1)
+            if self._exists:
+                raise ResourceExistsError("already exists")
+            self._exists = True
+
+        def append_block(self, data):
+            self.blocks.append(data)
+
+    class _FakeSvc:
+        def __init__(self, client):
+            self._client = client
+
+        def create_container(self, name):
+            pass
+
+        def get_blob_client(self, container, name):
+            return self._client
+
+    # A blob that already has content on the service - the case that must
+    # never be reset, whether from a prior batch this run or another worker.
+    existing = _FakeClient(exists=True)
+    sink = BlobSink(BLOB, "pyre-output")
+    monkeypatch.setattr(sink, "_service", lambda: _FakeSvc(existing))
+
+    sink.write([SIGNAL])
+    sink.write([SIGNAL2])                  # a second batch, same worker, same day
+
+    assert len(created) == 1               # creation attempted once, never again
+    assert len(existing.blocks) == 2       # both batches landed - nothing reset
+
+
 def test_blob_sink_authenticates_as_the_configured_identity(monkeypatch):
     """AZURE_CLIENT_ID pins every credential in the app to one user-assigned
     identity. Dropping it here fails every Azure call on a user-assigned setup,
