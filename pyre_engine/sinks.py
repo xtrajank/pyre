@@ -142,7 +142,8 @@ def _target(cfg, stream: str):
         container = getattr(cfg, f"{stream}_blob_container")
         if not account:
             return None, None               # reported by RuntimeConfig.problems()
-        return ("blob", account, container), lambda: BlobSink(account, container)
+        return ("blob", account, container), lambda: BlobSink(
+            account, container, rollover_minutes=cfg.blob_rollover_minutes)
     if kind == "http":
         url = getattr(cfg, f"{stream}_http_url")
         header = getattr(cfg, f"{stream}_http_auth_header")
@@ -199,10 +200,10 @@ class HttpSink:
 
 
 class BlobSink:
-    """One append blob per stream, per UTC day:
+    """One append blob per stream, bucketed by UTC time:
 
-        <container>/signals/2026-07-31.jsonl
-        <container>/alerts/2026-07-31.jsonl
+        <container>/signals/2026-07-31T14-00.jsonl
+        <container>/alerts/2026-07-31T14-00.jsonl
 
     Newline-delimited JSON, readable straight from the portal's storage browser.
     The stream prefix lives INSIDE the container, so pointing both streams at one
@@ -213,6 +214,19 @@ class BlobSink:
     operation with no read-modify-write, so concurrent workers cannot clobber
     each other and nothing already written is ever rewritten.
 
+    The bucket is `rollover_minutes` wide (BLOB_ROLLOVER_MINUTES, default 15)
+    rather than one blob per day. An append blob accepts at most 50,000 append
+    operations, ever - past that, every further write to it fails. `_append()`
+    does roughly one append call per batch that has records for this stream, so
+    at even a modest sustained rate a single ALL-DAY blob runs out of budget
+    hours before the day is over: at just 1 append/sec, 50,000 calls is only
+    ~13.9 hours. Every worker across every partition writes to the SAME blob for
+    a given bucket, so this only gets worse as the app scales out to more
+    partitions - which is exactly the situation high volume puts it in. Bucketing
+    by time gives each blob its own fresh 50,000-call budget; pick a width where
+    the worst-case call rate for this instance times the bucket width stays
+    comfortably under that.
+
     Alerts get an extra dedup pass that signals deliberately do not. Signals are
     an audit trail, so repeats there are meaningful. An alert should appear once,
     and while the processor already claims each alert atomically, that claim is
@@ -221,12 +235,16 @@ class BlobSink:
     this pass is redundant, and harmless.
     """
 
-    def __init__(self, account_url: str, container: str):
+    def __init__(self, account_url: str, container: str, rollover_minutes: int = 15):
         self._account_url = account_url
         self._container = container
+        # Zero or negative would divide-by-zero in _bucket(); a sink must never
+        # raise, so a bad setting degrades to "one blob per hour" rather than
+        # crashing the batch. problems() is what actually surfaces the bad value.
+        self._rollover_minutes = rollover_minutes if rollover_minutes > 0 else 60
         self._svc = None
         self._container_ready = False
-        self._known_blobs: set[str] = set()  # "<prefix>/<day>" confirmed to exist
+        self._known_blobs: set[str] = set()  # "<prefix>/<bucket>" confirmed to exist
         self._seen_alerts: OrderedDict[str, None] = OrderedDict()
 
     def describe(self) -> str:
@@ -266,8 +284,14 @@ class BlobSink:
             self._svc = BlobServiceClient(self._account_url, credential=cred)
         return self._svc
 
+    def _bucket(self) -> str:
+        """The current time, floored to `rollover_minutes` - what makes every
+        worker/partition writing at the same moment land on the same blob."""
+        now = datetime.now(timezone.utc)
+        floor_minute = (now.minute // self._rollover_minutes) * self._rollover_minutes
+        return now.strftime("%Y-%m-%dT%H-") + f"{floor_minute:02d}"
+
     def _blob_client(self, prefix: str):
-        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         svc = self._service()
         if not self._container_ready:
             try:
@@ -275,7 +299,7 @@ class BlobSink:
             except Exception:
                 pass                    # already exists, or no permission to create
             self._container_ready = True
-        blob_name = f"{prefix}/{day}.jsonl"
+        blob_name = f"{prefix}/{self._bucket()}.jsonl"
         client = svc.get_blob_client(self._container, blob_name)
         if blob_name not in self._known_blobs:
             # create_append_blob() RESETS an existing blob to 0 bytes - Put Blob

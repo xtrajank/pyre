@@ -141,10 +141,21 @@ is the reference.
 | `ALERT_HTTP_AUTH_HEADER` | | |
 | `ALERT_HTTP_BATCH` | `true` \| `false` | `false` |
 | `HTTP_TIMEOUT_SECONDS` | int | `10` |
+| `BLOB_ROLLOVER_MINUTES` | int, must divide 60 | `15` |
 
 `*_HTTP_AUTH_HEADER` is sent whole as the `Authorization` header (`Bearer abc`,
 `SharedKey xyz`), so any scheme works without a setting per scheme. **Set it to a
 Key Vault reference** — it is the one value in this surface that is a secret.
+
+> An append blob accepts at most 50,000 append operations, ever — past that,
+> every further write to it fails. `BlobSink` writes ONE blob per stream per
+> `BLOB_ROLLOVER_MINUTES`-wide bucket rather than per day, and every worker
+> across every partition writes to the same bucket's blob, so the busier the
+> instance the sooner an all-day blob would exhaust that budget. Size the
+> bucket so `(worst-case append calls/sec) × (bucket width in seconds)` stays
+> comfortably under 50,000 — the default of 15 minutes assumes on the order of
+> tens of batches/sec; a much higher sustained rate should use a narrower
+> bucket.
 
 ---
 
@@ -188,8 +199,10 @@ Set by you, consumed by the Azure Functions runtime.
 | `FUNCTIONS_WORKER_RUNTIME` | `python` |
 | `AzureWebJobsStorage` | Not just scratch space: **the Event Hub trigger keeps its checkpoints and partition leases there.** A host with no reachable storage registers the trigger and then never listens. |
 | `AzureWebJobsStorage__clientId` | See [Identity](#identity). |
-| `AzureFunctionsJobHost__extensions__eventHubs__maxEventBatchSize` | Overrides [`host.json`](../host.json) without a redeploy. |
+| `AzureFunctionsJobHost__extensions__eventHubs__maxEventBatchSize` | Overrides [`host.json`](../host.json) without a redeploy. Same pattern works for `batchCheckpointFrequency`, `prefetchCount`, `targetUnprocessedEventThreshold`. |
 | `SCM_DO_BUILD_DURING_DEPLOYMENT`, `ENABLE_ORYX_BUILD` | Both `true` — build dependencies on the worker from `requirements.txt`. |
+| `PYTHON_THREADPOOL_THREAD_COUNT` | Unset by default. On **Flex Consumption** that already defaults to `1000`. On Consumption/Premium/Dedicated with Python 3.9+ (this app runs 3.11) it resolves to `min(32, cpu_count + 4)` instead — still Microsoft's own recommended starting point for I/O-bound work, which is what the Redis round-trips and blob appends in the batch loop are. Usually leave unset either way. |
+| `FUNCTIONS_WORKER_PROCESS_COUNT` | Default 1, max 10 — **not available on Flex Consumption at all** (that plan always runs one worker process per instance; scale via more instances instead). On Premium/Dedicated it spawns separate Python **processes** per instance, the only way to get real parallelism on the CPU-bound rule-evaluation loop since threads in one process still share a GIL. Match it to actual cores on the plan there; higher adds context-switch overhead instead of throughput. **Do not raise this above 1 while `STATE_BACKEND=memory`** — each process gets its own in-memory state store, so the same "two workers count independently" problem in [State](#state) happens on a single instance, before scale-out even enters the picture. |
 
 ---
 

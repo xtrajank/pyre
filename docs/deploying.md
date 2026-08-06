@@ -307,14 +307,65 @@ most one active reader per partition, so a 4-partition hub will never use more
 than 4 concurrent workers however far the plan scales. Size partitions when you
 create the hub; they cannot be reduced.
 
+Target-based scaling doesn't scale to every instance count between 1 and the
+partition count — it picks from a fixed list per partition count (e.g. 8
+partitions: only 1, 2, 3, 4, or 8 instances; 16 partitions: 1, 2, 3, 4, 5, 6, 8,
+or 16). A partition count with a finer-grained list gives the platform more
+intermediate steps to scale through under real traffic; 16 or 32 partitions
+offer noticeably more of those than 8 or 10 do.
+
 Batch tuning lives in [`host.json`](../host.json) —
-`maxEventBatchSize`, `prefetchCount`, `batchCheckpointFrequency` — and can be
-overridden per instance without a redeploy via
-`AzureFunctionsJobHost__extensions__eventHubs__maxEventBatchSize`.
+`maxEventBatchSize`, `prefetchCount`, `batchCheckpointFrequency`,
+`targetUnprocessedEventThreshold` — and can be overridden per instance without
+a redeploy via `AzureFunctionsJobHost__extensions__eventHubs__<setting>`.
+
+**On Consumption, Flex Consumption, and Premium, `maxEventBatchSize` also
+drives scaling, not just batch size.** These plans default to [target-based
+scaling](https://learn.microsoft.com/azure/azure-functions/functions-target-based-scaling#event-hubs):
+`desired instances = unprocessed events / maxEventBatchSize`. Raising the batch
+size for throughput (fewer invocations, better blob-append economy) also makes
+scaling less aggressive for the same backlog, unless `targetUnprocessedEventThreshold`
+is set separately to pin the scaling target independent of the batch size — which
+is what this app does (`maxEventBatchSize: 200`, `targetUnprocessedEventThreshold: 100`,
+keeping scaling as aggressive as the original 100-sized default).
+
+**Leave `batchCheckpointFrequency` at `1` on any plan using target-based
+scaling** (Consumption, Flex Consumption, Premium — i.e. most deployments).
+Microsoft's docs carry an explicit warning: values above `1` make the platform
+miscount unprocessed events (processed-but-not-yet-checkpointed batches look
+like backlog), which can block proper scale-in. This is a real constraint, not
+a style preference — don't raise it on these plans even for the checkpoint-I/O
+savings discussed elsewhere. Dedicated (App Service) plans don't use
+event-driven scaling at all, so the constraint doesn't apply there.
 
 **Set `STATE_BACKEND=redis` for any instance that scales past one worker.**
 `memory` behaves identically on one instance; across scale-out two workers count
 independently and both can alert.
+
+**`FUNCTIONS_WORKER_PROCESS_COUNT` is the lever for CPU-bound rule evaluation,
+not I/O — but it's plan-dependent.** `PYTHON_THREADPOOL_THREAD_COUNT` covers
+concurrent I/O (Redis round-trips, blob appends) within one process: threads
+share a GIL, so they don't parallelize the per-event rule loop, only overlap
+its blocking I/O. `FUNCTIONS_WORKER_PROCESS_COUNT` does parallelize the rule
+loop, by running separate processes — but **it isn't available on Flex
+Consumption at all**, which always runs one worker process per instance; it
+only applies on Premium/Dedicated, where it should be matched to the plan's
+actual core count. Either way, **only raise process count once `STATE_BACKEND=redis`
+is live** — each extra process is its own in-memory state store otherwise,
+reproducing the scale-out alerting bug above on a single instance. On Flex
+Consumption specifically, `PYTHON_THREADPOOL_THREAD_COUNT` already defaults to
+`1000` (not the `cpu_count + 4` default on other plans), so there's essentially
+never a reason to raise it there — CPU-bound work should scale via more
+instances instead, which is exactly what Flex Consumption is built to do
+quickly.
+
+**`BLOB_ROLLOVER_MINUTES` (default 15) needs to shrink as volume grows.** An
+append blob accepts at most 50,000 append operations before every further write
+fails, and every worker/partition writing to a `blob` destination shares the
+same blob for a given bucket. At a few tens of batches/sec the default is fine;
+sustained volume well above that should use a narrower bucket so one busy
+stream can't exhaust a blob's budget before its bucket rolls over. See
+[configuration.md](configuration.md#destinations).
 
 ---
 

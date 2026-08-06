@@ -63,8 +63,10 @@
     "//ALERT_HTTP_BATCH": "false = one POST per alert, which is what a case tool wants.",
     "ALERT_HTTP_BATCH": "false",
     "HTTP_TIMEOUT_SECONDS": "10",
+    "//BLOB_ROLLOVER_MINUTES": "Each stream's blob is bucketed by this many minutes, not by day - an append blob caps at 50,000 append calls total, and one all-day blob shared by every worker/partition burns through that budget in hours at real volume. Must divide 60 evenly.",
+    "BLOB_ROLLOVER_MINUTES": "15",
 
-    "//STATE_BACKEND": "memory|redis. `redis` shares dedup/thresholds across workers.",
+    "//STATE_BACKEND": "memory|redis. `redis` shares dedup/thresholds across workers - required once more than one partition is being consumed concurrently, or the same alert can fire once per worker.",
     "STATE_BACKEND": "memory",
     "REDIS_HOST": "",
     "REDIS_PORT": "6380",
@@ -72,6 +74,6 @@
     "ALERT_STORM_LIMIT_PER_HOUR": "1000",
 
     "//AzureFunctionsJobHost__...": "Overrides host.json without a redeploy.",
-    "AzureFunctionsJobHost__extensions__eventHubs__maxEventBatchSize": "50"
+    "AzureFunctionsJobHost__extensions__eventHubs__maxEventBatchSize": "200"
   }
 }

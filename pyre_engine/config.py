@@ -363,6 +363,15 @@ class RuntimeConfig:
     http_timeout_seconds: int = field(
         default_factory=lambda: _env_int("HTTP_TIMEOUT_SECONDS", 10))
 
+    # An append blob accepts at most 50,000 append operations before every
+    # further write to it fails. BlobSink buckets each stream's blob by this
+    # many minutes instead of by day so one busy stream can't exhaust that
+    # cap before its bucket rolls over - see BlobSink's docstring for the
+    # sizing math. Must divide 60 evenly for the bucket boundaries to land on
+    # the hour.
+    blob_rollover_minutes: int = field(
+        default_factory=lambda: _env_int("BLOB_ROLLOVER_MINUTES", 15))
+
     # --- dedup / threshold state --------------------------------------------
     # `redis` shares state across workers, which is what makes thresholds and
     # dedup correct under scale-out. `memory` is per worker and resets on a
@@ -412,8 +421,13 @@ class RuntimeConfig:
             out.append("STATE_BACKEND=redis but REDIS_HOST is not set")
 
         for name in ("DETECTIONS_REFRESH_SECONDS", "HTTP_TIMEOUT_SECONDS",
-                     "REDIS_PORT", "ALERT_STORM_LIMIT_PER_HOUR"):
+                     "REDIS_PORT", "ALERT_STORM_LIMIT_PER_HOUR", "BLOB_ROLLOVER_MINUTES"):
             out += _check_int(name)
+        if self.blob_rollover_minutes <= 0:
+            out.append(f"BLOB_ROLLOVER_MINUTES={self.blob_rollover_minutes} must be positive")
+        elif 60 % self.blob_rollover_minutes != 0:
+            out.append(f"BLOB_ROLLOVER_MINUTES={self.blob_rollover_minutes} does not divide "
+                       f"60 evenly; blob buckets will drift instead of landing on the hour")
 
         out += check_eventhub_settings(self.sources)
         return out
