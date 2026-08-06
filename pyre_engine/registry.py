@@ -13,6 +13,7 @@ import importlib.util
 import logging
 import os
 import sys
+import threading
 import time
 from types import ModuleType
 
@@ -224,19 +225,30 @@ class BundleLoader:
         self._registry: Registry | None = None
         self._version: str | None = None
         self._next_check = 0.0
+        # The Functions host runs several invocations concurrently on one
+        # worker. Without this, two threads hitting the refresh boundary at
+        # once would both reload - wasted work at best, and at worst a race
+        # in `_prepare_imports`, which mutates sys.path/sys.modules directly.
+        self._lock = threading.Lock()
 
     def get(self) -> Registry:
         now = time.monotonic()
         if self._registry is None or now >= self._next_check:
-            self._next_check = now + self._interval
-            try:
-                self._maybe_reload()
-            except Exception:
-                if self._registry is None:
-                    raise              # cold start with no bundle: nothing to serve
-                # Otherwise keep serving the last-good Registry. A transient blob
-                # or network blip must never stop detection.
-                log.exception("bundle refresh failed; still serving version %s", self._version)
+            with self._lock:
+                # Re-check: another thread may have refreshed while this one
+                # was waiting on the lock, in which case there's nothing to do.
+                now = time.monotonic()
+                if self._registry is None or now >= self._next_check:
+                    self._next_check = now + self._interval
+                    try:
+                        self._maybe_reload()
+                    except Exception:
+                        if self._registry is None:
+                            raise      # cold start with no bundle: nothing to serve
+                        # Otherwise keep serving the last-good Registry. A transient
+                        # blob or network blip must never stop detection.
+                        log.exception("bundle refresh failed; still serving version %s",
+                                      self._version)
         return self._registry
 
     @property

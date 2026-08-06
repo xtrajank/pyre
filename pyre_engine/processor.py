@@ -47,7 +47,6 @@ class Processor:
         # run can substitute a fake; nothing below behaves differently for it.
         self.state = state or build_state_store(cfg)
         self.sink = sink or build_router(cfg)
-        self.records = RecordWriter(self.sink)
         self.loader = BundleLoader(source_from_config(cfg), cfg.detections_refresh_seconds)
 
     def destinations(self) -> dict:
@@ -66,6 +65,12 @@ class Processor:
         body is hashed instead.
         """
         started = time.monotonic()
+        # Local to this call, not a Processor attribute: the Functions host runs
+        # several invocations concurrently on one worker (different partitions,
+        # same process), and a buffer shared across them would let one
+        # invocation's flush() clear records another one just added but hadn't
+        # written yet - silent loss, worse the more concurrency there is.
+        records = RecordWriter(self.sink)
         registry = self.loader.get()          # hot-reloads on a detection publish
         hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
         processed_time = now_iso()
@@ -147,7 +152,7 @@ class Processor:
                 # ALWAYS a signal on match. Whether it ends up inside an alert
                 # isn't known until the thresholds below are evaluated, and
                 # nothing is flushed yet, so p_alert_id is filled in later.
-                signal = self.records.add(build_signal(
+                signal = records.add(build_signal(
                     det, source, event, log_type, dedup_str, indicators, processed_time))
                 n_signals += 1
                 if not det.create_alert:
@@ -200,10 +205,10 @@ class Processor:
                 signal["p_alert_id"] = self.state.alert_exists(det.id, dedup_str)
                 continue
             signal["p_alert_id"] = alert["p_alert_id"]
-            self.records.add(alert)
+            records.add(alert)
             n_alerts += 1
 
-        self.records.flush()                   # one write-back per invocation
+        records.flush()                        # one write-back per invocation
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         log.info("batch %s msgs=%d events=%d new=%d signals=%d alerts=%d %dms",
