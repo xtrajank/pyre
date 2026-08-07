@@ -134,6 +134,8 @@ class Processor:
                 continue
 
             for det in detections:
+                if not det.enabled:
+                    continue
                 try:
                     if not det.rule(event):
                         continue
